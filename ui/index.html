@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clipper</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">Clipper</div>
+  <form id="new-job">
+    <input id="url" type="text" placeholder="Paste a Kick VOD link (kick.com/…/videos/…)" autocomplete="off" spellcheck="false">
+    <select id="kind" title="What kind of stream this is">
+      <option value="irl">IRL / chatting</option>
+      <option value="gaming">Gaming</option>
+      <option value="film">Film / TV reaction</option>
+    </select>
+    <input id="topic" type="text" placeholder="Topic (e.g. GTA 6)" autocomplete="off">
+    <button class="primary" type="submit">Find clips</button>
+  </form>
+  <button id="open-music">Music</button>
+  <button id="open-settings">Settings</button>
+</header>
+
+<div class="shell">
+  <aside>
+    <h3>Streams</h3>
+    <div id="job-list"></div>
+  </aside>
+  <main id="main">
+    <div class="empty" id="empty">
+      <h1>Turn a Kick stream into Shorts</h1>
+      <p>Paste the link to a finished stream above. Clipper finds the strongest moments, reframes them to 9:16, adds captions, and shows a viral-chance score and a copyright risk check for each one.</p>
+    </div>
+    <div id="job" hidden></div>
+  </main>
+</div>
+
+<dialog id="settings">
+  <form method="dialog" class="modal">
+    <h2>Settings</h2>
+    <fieldset>
+      <legend>Claude (smarter moment picking, titles and scores)</legend>
+      <label class="row"><input type="checkbox" id="s-use_claude"> Use the Claude API</label>
+      <p class="hint" id="s-claude-state"></p>
+      <label>Anthropic API key <input type="password" id="s-anthropic_api_key" autocomplete="off"></label>
+      <label>Model
+        <select id="s-claude_model">
+          <option value="claude-opus-5-5">Claude Opus 5.5 (default)</option>
+          <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (cheaper)</option>
+          <option value="claude-haiku-5-5">Claude Haiku 5.5 (cheapest)</option>
+          <option value="claude-fable-5-2">Claude Fable 5.2 (most capable, priciest)</option>
+        </select>
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend>Clips</legend>
+      <div class="grid3">
+        <label>Clips per stream <input type="number" id="s-clip_count" min="1" max="20"></label>
+        <label>Shortest (sec) <input type="number" id="s-min_len" min="5" max="120"></label>
+        <label>Longest (sec) <input type="number" id="s-max_len" min="10" max="180"></label>
+      </div>
+      <div class="grid3">
+        <label>Captions
+          <select id="s-caption_style"><option value="pop">Word-by-word pop</option><option value="karaoke">Karaoke line</option><option value="clean">Clean</option><option value="none">None</option></select>
+        </label>
+        <label>Highlight colour
+          <select id="s-highlight"><option>yellow</option><option>green</option><option>cyan</option><option>pink</option><option>orange</option><option>white</option></select>
+        </label>
+        <label>Max quality
+          <select id="s-max_height"><option value="1080">1080p</option><option value="720">720p</option></select>
+        </label>
+      </div>
+      <label class="row"><input type="checkbox" id="s-progress_bar"> Progress bar along the bottom of each Short</label>
+    </fieldset>
+    <fieldset>
+      <legend>Speech recognition (runs on this PC)</legend>
+      <div class="grid3">
+        <label>Model
+          <select id="s-whisper_model"><option value="large-v3-turbo">Best (large-v3-turbo)</option><option value="medium">Medium</option><option value="small">Small (fast)</option></select>
+        </label>
+        <label>Language <input type="text" id="s-language" placeholder="auto (or en, es, ar…)"></label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>YouTube uploads and scheduling</legend>
+      <p class="hint" id="yt-state"></p>
+      <details id="yt-setup">
+        <summary>One-time setup</summary>
+        <ol class="hint">
+          <li>In <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a>, create a project and enable "YouTube Data API v3".</li>
+          <li>Set up the OAuth consent screen and add your own Google account as a test user.</li>
+          <li>Create credentials → OAuth client ID → type "Desktop app", and download the JSON file.</li>
+          <li>Paste the file's contents below, save it, then press Connect and sign in.</li>
+        </ol>
+        <textarea id="yt-client" rows="3" placeholder='{"installed": {"client_id": "…", …}}' spellcheck="false"></textarea>
+        <button type="button" id="yt-save-client">Save client file</button>
+      </details>
+      <div class="actions left">
+        <button type="button" id="yt-connect">Connect YouTube channel</button>
+        <button type="button" id="yt-disconnect" class="danger">Disconnect</button>
+      </div>
+      <div class="grid3">
+        <label>Daily upload times <input type="text" id="s-schedule_times" placeholder="12:00, 18:00"></label>
+        <label>"Upload now" visibility
+          <select id="s-youtube_privacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select>
+        </label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Optional services</legend>
+      <label>AudD API key (names the exact song playing in a clip) <input type="password" id="s-audd_api_key" autocomplete="off"></label>
+      <label>Jamendo client ID (ranks free music by this week's popularity) <input type="text" id="s-jamendo_client_id" autocomplete="off"></label>
+    </fieldset>
+    <div class="actions">
+      <button type="button" id="settings-cancel">Cancel</button>
+      <button type="button" class="primary" id="settings-save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="music">
+  <div class="modal wide">
+    <h2>Music</h2>
+    <div class="tabs">
+      <button data-tab="lib" class="active">Your library</button>
+      <button data-tab="find">Find free music</button>
+      <button data-tab="trend">Trending now</button>
+    </div>
+    <section data-pane="lib">
+      <p class="hint">Tracks you downloaded here plus anything you put in your own music folder. <button class="link" id="open-music-folder">Open my music folder</button></p>
+      <div id="lib-list" class="list"></div>
+    </section>
+    <section data-pane="find" hidden>
+      <div class="moods" id="moods"></div>
+      <form id="music-search"><input type="text" id="music-q" placeholder="or search: phonk, lofi, epic…"><button>Search</button></form>
+      <p class="hint">Only tracks whose licence allows use in edited, monetised videos. Most need a credit in the description; Clipper adds it to the export file. A free licence doesn't stop an artist from also registering a track with Content ID, so an occasional claim is still possible.</p>
+      <div id="find-list" class="list"></div>
+    </section>
+    <section data-pane="trend" hidden>
+      <p class="hint">These are today's most-played commercial songs. Clipper doesn't download them, because baking one into the video is what gets a Short claimed. To use one, export your Short with no song (or a quiet one) and add the sound inside the YouTube app when you upload, where it's licensed.</p>
+      <div id="trend-list" class="list"></div>
+    </section>
+    <div class="actions"><button type="button" id="music-close">Close</button></div>
+  </div>
+</dialog>
+
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

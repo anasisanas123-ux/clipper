@@ -1,0 +1,13 @@
+{
+  "name": "clipper",
+  "version": "1.0.0",
+  "description": "Finds viral moments in Kick streams and turns them into captioned YouTube Shorts",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

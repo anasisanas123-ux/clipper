@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+yt-dlp[default,curl-cffi]
+faster-whisper
+numpy
+scipy
+opencv-python-headless<5
+imageio-ffmpeg
+anthropic
+httpx
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+google-api-python-client
+google-auth-oauthlib
