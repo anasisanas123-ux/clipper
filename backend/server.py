@@ -1,25 +1,32 @@
 """Local HTTP API + UI host. Bound to 127.0.0.1 only."""
 import argparse
+import logging
+import logging.handlers
+import re
 import subprocess
+from pathlib import Path
 
 import uvicorn
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, jobs, music, youtube
+from . import config, jobs, music, providers, sources, youtube
 
 app = FastAPI(title="Clipper")
 
 
 def _public_settings():
     s = config.load_settings()
-    key = config.api_key(s)
-    s["anthropic_api_key"] = ""
-    s["has_api_key"] = bool(key)
-    s["key_hint"] = ("…" + key[-4:]) if key else ""
+    keys = {p: config.ai_key(s, p) for p in providers.PROVIDERS}
+    s.pop("ai_keys", None)
+    # Keys never leave the engine; the UI only learns whether one is saved and its last 4 characters.
+    s["key_hints"] = {p: ("…" + k[-4:]) for p, k in keys.items() if k}
     s["has_audd_key"] = bool(s.pop("audd_api_key"))
-    s["claude_active"] = config.claude_enabled(config.load_settings())
+    ready, why = providers.readiness(s | {"ai_keys": keys})
+    s["ai_ready"], s["ai_status"] = ready, why
+    s["providers"] = {p: {k: v[k] for k in ("label", "needs_key", "key_url", "base")}
+                      for p, v in providers.PROVIDERS.items()}
     return s
 
 
@@ -30,15 +37,41 @@ def get_settings():
 
 @app.post("/api/settings")
 def post_settings(patch: dict = Body(...)):
-    # Blank secret fields mean "keep what's saved", so the UI never has to hold the key.
-    for secret in ("anthropic_api_key", "audd_api_key"):
-        if patch.get(secret) == "":
-            patch.pop(secret)
+    # A blank key field means "keep what's saved", so the UI never has to hold the key.
+    if patch.get("audd_api_key") == "":
+        patch.pop("audd_api_key")
+    key = (patch.pop("ai_key", None) or "").strip()
+    provider = patch.get("ai_provider") or config.load_settings()["ai_provider"]
+    if provider not in providers.PROVIDERS:
+        raise HTTPException(400, "Unknown AI provider")
+    if key:
+        patch["ai_keys"] = {provider: key}
     for k in patch.pop("clear", []):
-        if k in ("anthropic_api_key", "audd_api_key"):
+        if k == "audd_api_key":
             patch[k] = ""
+        if k == "ai_key":
+            patch["ai_keys"] = {provider: ""}
+    if patch.get("ai_model") is not None:
+        patch["ai_models"] = {provider: str(patch.pop("ai_model")).strip()}
+    if patch.get("scorer") not in (None, "builtin", "ai"):
+        raise HTTPException(400, "Unknown scoring mode")
     config.save_settings(patch)
     return _public_settings()
+
+
+@app.post("/api/ai/models")
+def ai_models(body: dict = Body(...)):
+    """Lists the models a provider offers. Uses the key typed in the form if given, else the saved one."""
+    provider = body.get("provider")
+    if provider not in providers.PROVIDERS:
+        raise HTTPException(400, "Unknown AI provider")
+    s = config.load_settings()
+    if provider == "custom" and body.get("base_url"):
+        s["custom_base_url"] = body["base_url"]
+    try:
+        return {"models": providers.list_models(s, provider, (body.get("key") or "").strip() or None)}
+    except providers.AIError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/jobs")
@@ -50,7 +83,12 @@ def list_jobs():
 def create_job(body: dict = Body(...)):
     url = (body.get("url") or "").strip().strip('"')
     if not url:
-        raise HTTPException(400, "Paste a Kick VOD link first")
+        raise HTTPException(400, "Paste a Kick or YouTube link, or add a video file")
+    if sources.is_local(url):
+        if Path(url).suffix.lower() not in sources.VIDEO_EXT:
+            raise HTTPException(400, "That file type isn't supported. Use an mp4, mkv, mov, webm or similar video.")
+    elif not re.match(r"https?://", url):
+        raise HTTPException(400, "That isn't a link or a video file on this PC")
     return jobs.create(url, body.get("kind") or "irl", body.get("topic") or "")
 
 
@@ -188,7 +226,7 @@ def music_file(kind: str, name: str):
 
 @app.post("/api/open-folder")
 def open_folder(body: dict = Body(...)):
-    target = {"music": config.MUSIC_MINE, "exports": config.EXPORTS}.get(body.get("which"))
+    target = {"music": config.MUSIC_MINE, "exports": config.EXPORTS, "logs": config.DATA}.get(body.get("which"))
     if not target:
         raise HTTPException(400, "Unknown folder")
     subprocess.Popen(["explorer", str(target)])
@@ -202,6 +240,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8756)
     args = ap.parse_args()
+    # data/clipper.log keeps what each job did and how long it took, for troubleshooting on other PCs.
+    handler = logging.handlers.RotatingFileHandler(config.DATA / "clipper.log", maxBytes=2_000_000,
+                                                   backupCount=2, encoding="utf-8")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        handlers=[handler, logging.StreamHandler()])
+    for noisy in ("httpx", "httpcore", "faster_whisper", "googleapiclient", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    logging.getLogger("clipper").info("Clipper started")
     jobs.start()
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 

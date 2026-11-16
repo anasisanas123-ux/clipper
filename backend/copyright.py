@@ -35,7 +35,7 @@ def assess(wav_path, song_entry, is_local_file: bool, settings: dict, kind: str 
                       "detail": "Publishers generally allow gameplay clips, but in-game radio and licensed "
                                 "soundtrack songs can still be claimed."})
 
-    # 1. Music already playing in the stream audio (the usual cause of Content ID claims).
+    # 1. Music already playing in the video's own audio (the usual cause of Content ID claims).
     m = audio.music_likelihood(wav_path)
     matched, id_error = None, None
     if settings.get("audd_api_key"):
@@ -44,19 +44,19 @@ def assess(wav_path, song_entry, is_local_file: bool, settings: dict, kind: str 
         except Exception as e:
             id_error = str(e)
     if matched:
-        items.append({"level": "high", "label": "Copyrighted song identified in the stream audio",
+        items.append({"level": "high", "label": "Copyrighted song identified in the video's own audio",
                       "detail": f"\"{matched['title']}\" by {matched['artist']}. Expect a Content ID claim; "
                                 f"mute or replace that section."})
     elif m["score"] >= 0.6:
-        items.append({"level": "high", "label": "Music is very likely playing in the stream audio",
+        items.append({"level": "high", "label": "Music is very likely playing in the video's own audio",
                       "detail": "Steady beat and sustained tones detected. If it's a commercial song, YouTube "
                                 "can claim or block the Short."})
     elif m["score"] >= 0.3:
-        items.append({"level": "medium", "label": "Possible background music in the stream audio",
+        items.append({"level": "medium", "label": "Possible background music in the video's own audio",
                       "detail": "Some musical signal detected (could also be game music or sound effects). "
                                 "Listen before uploading."})
     else:
-        items.append({"level": "low", "label": "No clear music detected in the stream audio",
+        items.append({"level": "low", "label": "No clear music detected in the video's own audio",
                       "detail": "Mostly speech and game sound."})
     if id_error:
         items.append({"level": "low", "label": "Song lookup failed", "detail": id_error})
@@ -75,10 +75,15 @@ def assess(wav_path, song_entry, is_local_file: bool, settings: dict, kind: str 
                           "detail": "The app can't verify its licence. Safe only if you have the rights to it."})
 
     # 3. Whose footage it is.
-    if not is_local_file:
-        items.append({"level": "medium", "label": "Streamer's permission not verified",
-                      "detail": "The footage belongs to the streamer. Re-uploading without their permission can "
-                                "get the Short removed or a strike, even with no music in it."})
+    if is_local_file:
+        items.append({"level": "medium", "label": "Ownership of this file is unknown",
+                      "detail": "Fine if you recorded it yourself. If it was downloaded from someone else's channel "
+                                "or stream, re-uploading without their permission can get the Short removed or a "
+                                "strike."})
+    else:
+        items.append({"level": "medium", "label": "Creator's permission not verified",
+                      "detail": "The footage belongs to the streamer or channel. Re-uploading without their "
+                                "permission can get the Short removed or a strike, even with no music in it."})
 
     overall = max((i["level"] for i in items), key=LEVELS.index)
     return {"overall": overall, "items": items, "music_score": m["score"],

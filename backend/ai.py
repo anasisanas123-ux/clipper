@@ -1,20 +1,11 @@
-"""Optional Claude pass: reads the whole transcript and picks, titles, and scores the moments."""
-import json
+"""Optional AI pass: a connected model reads the whole transcript and picks, titles, and scores the moments."""
+from . import moments, providers
 
-import anthropic
+SYSTEM = """You pick the moments from a long video (a livestream, podcast or similar) that will perform best as \
+YouTube Shorts.
 
-from . import config, moments
-
-# USD per million tokens (input, output), for the cost shown after a run.
-PRICES = {
-    "claude-opus-5-5": (4.0, 20.0), "claude-sonnet-5-5": (2.0, 10.0),
-    "claude-haiku-5-5": (0.10, 0.50), "claude-fable-5-2": (8.0, 40.0),
-}
-
-SYSTEM = """You pick the moments from a livestream that will perform best as YouTube Shorts.
-
-You get the stream's transcript. Each line starts with its time in seconds from the start of the stream. \
-A line marked LOUD is where the audio jumped well above the stream's normal level (shouting, laughing, a big \
+You get the video's transcript. Each line starts with its time in seconds from the start of the video. \
+A line marked LOUD is where the audio jumped well above the video's normal level (shouting, laughing, a big \
 in-game event). The transcript comes from speech recognition, so expect misheard words and missing punctuation, \
 and remember you cannot see the video: prefer moments where the words and the loudness together make it clear \
 something happened.
@@ -29,8 +20,8 @@ For each moment, choose start and end times that include the setup and stop just
 length limits given. Moments must not overlap.
 
 Score honestly. `virality` is your estimate from 0 to 100 of how well the clip would do relative to typical \
-stream clips: 50 is an ordinary clip, 70 is clearly good, 85 and above is rare and needs an obvious hook and \
-payoff. A stream with nothing special in it should get low scores across the board. The four sub-scores use \
+clips of this kind: 50 is an ordinary clip, 70 is clearly good, 85 and above is rare and needs an obvious hook \
+and payoff. A video with nothing special in it should get low scores across the board. The four sub-scores use \
 the same scale. In `reasons`, give two or three short, specific reasons a viewer would watch or share it, and \
 name any weakness that held the score down.
 
@@ -47,6 +38,12 @@ KIND_NOTES = {
     "film": "The streamer is reacting to or talking about a film or show. Pick the streamer's own reactions, "
             "jokes and opinions. Avoid stretches where the film's own audio plays with no commentary: those add "
             "nothing original and are what studios' automated matching claims.",
+    "podcast": "This is a podcast or interview, so loudness matters little: the moments are in what is said. "
+               "Look for a bold or controversial opinion, a surprising fact or number, a personal story with a "
+               "clear payoff, a confession, a heated disagreement, a big laugh, or one sharp piece of advice. The "
+               "clip must open on the line that makes a stranger stop scrolling (often a question or the start "
+               "of the claim), not on small talk. Weak podcast clips are vague, need earlier context, or trail "
+               "off without landing the point.",
 }
 
 SCHEMA = {
@@ -90,77 +87,71 @@ def _transcript_lines(segments, z):
     return "\n".join(lines)
 
 
-def _clamp(v):
-    return int(max(0, min(100, v)))
-
-
-def pick_moments(segments, z, meta, settings, limit, local_candidates):
-    """Returns (moments, info). Raises on API failure so the caller can fall back to the local picks."""
-    client = anthropic.Anthropic(api_key=config.api_key(settings))
-    model = settings.get("claude_model") or "claude-opus-5-5"
-    hints = ", ".join(f"{int(c['start'])}-{int(c['end'])}" for c in local_candidates[:20])
-    user = (
-        f"Stream: \"{meta.get('title')}\" by {meta.get('streamer')}. Length: {int(len(z))} seconds.\n"
-        f"{KIND_NOTES.get(meta.get('kind'), KIND_NOTES['irl'])}"
-        f"{' Topic: ' + meta['topic'] + '.' if meta.get('topic') else ''}\n\n"
-        f"<transcript>\n{_transcript_lines(segments, z)}\n</transcript>\n\n"
-        f"A loudness-based detector flagged these second ranges as candidates; use them as leads, not as the "
-        f"answer: {hints or 'none'}.\n\n"
-        f"Return the {limit} best moments (fewer if the stream doesn't have that many worth clipping), each "
-        f"between {settings['min_len']} and {settings['max_len']} seconds long."
-    )
-    kwargs = dict(
-        model=model, max_tokens=16000, system=SYSTEM,
-        messages=[{"role": "user", "content": user}],
-        output_config={"effort": "medium", "format": {"type": "json_schema", "schema": SCHEMA}},
-    )
+def _num(v, default=50):
     try:
-        # Lets the API hand the request to another model if a safety classifier declines it.
-        with client.beta.messages.stream(betas=["server-side-fallback-2026-07-01"], fallbacks="default",
-                                         **kwargs) as stream:
-            resp = stream.get_final_message()
-    except (TypeError, anthropic.BadRequestError):
-        with client.messages.stream(**kwargs) as stream:
-            resp = stream.get_final_message()
+        return int(max(0, min(100, float(v))))
+    except (TypeError, ValueError):
+        return default
 
-    if resp.stop_reason == "refusal":
-        raise RuntimeError("Claude declined to analyse this transcript")
-    if resp.stop_reason == "max_tokens":
-        raise RuntimeError("Claude's answer was cut off")
-    data = json.loads(next(b.text for b in resp.content if b.type == "text"))
 
+def _text(v, limit):
+    return str(v or "").strip()[:limit]
+
+
+def pick_moments(segments, z, meta, settings, limit, local_candidates, whole=False):
+    """Returns (moments, info). Raises on failure so the caller can fall back to the built-in picks.
+    whole=True scores an already-cut clip as one moment instead of searching inside it."""
+    length = int(meta.get("duration") or len(z))
+    by = f" by {meta['streamer']}" if meta.get("streamer") else ""
+    head = (f"Video: \"{meta.get('title')}\"{by}. Length: {length} seconds.\n"
+            f"{KIND_NOTES.get(meta.get('kind'), KIND_NOTES['irl'])}"
+            f"{' Topic: ' + meta['topic'] + '.' if meta.get('topic') else ''}\n\n"
+            f"<transcript>\n{_transcript_lines(segments, z)}\n</transcript>\n\n")
+    if whole:
+        ask = (f"This video is already cut to Short length. Return exactly one moment covering the whole video "
+               f"(start 0, end {length}) and score, title and tag it as it stands.")
+    else:
+        hints = ", ".join(f"{int(c['start'])}-{int(c['end'])}" for c in local_candidates[:20])
+        ask = (f"A simple detector flagged these second ranges as candidates; use them as leads, not as the "
+               f"answer: {hints or 'none'}.\n\n"
+               f"Return the {limit} best moments (fewer if the video doesn't have that many worth clipping), each "
+               f"between {settings['min_len']} and {settings['max_len']} seconds long.")
+    data, info = providers.ask_json(settings, SYSTEM, head + ask, SCHEMA)
+
+    # Smaller models sometimes drop or mistype fields, so every field is read defensively.
     out = []
-    for m in data.get("moments", []):
-        start, end = float(m["start_sec"]), float(m["end_sec"])
-        if end <= start or start >= len(z):
+    for m in (data.get("moments") if isinstance(data, dict) else None) or []:
+        if not isinstance(m, dict):
             continue
-        start, end = moments.snap(segments, start, end, settings["min_len"], settings["max_len"])
+        try:
+            start, end = float(m.get("start_sec")), float(m.get("end_sec"))
+        except (TypeError, ValueError):
+            continue
+        if end <= start or start >= length:
+            continue
+        if whole:
+            start, end = 0.0, float(length)
+        else:
+            start, end = moments.snap(segments, start, end, settings["min_len"], settings["max_len"], length)
         if any(start < o["end"] and end > o["start"] for o in out):
             continue
+        text = moments._text_between(segments, start, end)
+        title = _text(m.get("title"), 100) or moments._hook(text, meta.get("kind"))
+        tags = m.get("hashtags") if isinstance(m.get("hashtags"), list) else []
+        reasons = m.get("reasons") if isinstance(m.get("reasons"), list) else []
+        mood = m.get("mood") if m.get("mood") in ("hype", "funny", "tense", "chill", "emotional", "rage") else "hype"
         out.append({
             "start": round(start, 2), "end": round(end, 2),
-            "title": m["title"].strip()[:100], "hook": m["hook"].strip()[:60],
-            "score": _clamp(m["virality"]),
-            "breakdown": {"hook": _clamp(m["hook_strength"]), "emotion": _clamp(m["emotion"]),
-                          "stands alone": _clamp(m["self_contained"]), "shareable": _clamp(m["shareability"])},
-            "reasons": [r.strip() for r in m["reasons"]][:4], "mood": m["mood"], "source": "claude",
-            "hashtags": [t for t in (moments._tag(h) for h in m["hashtags"]) if t and t != "shorts"][:8],
-            "transcript": moments._text_between(segments, start, end),
+            "title": title, "hook": _text(m.get("hook"), 60) or title[:60],
+            "score": _num(m.get("virality")),
+            "breakdown": {"hook": _num(m.get("hook_strength")), "emotion": _num(m.get("emotion")),
+                          "stands alone": _num(m.get("self_contained")), "shareable": _num(m.get("shareability"))},
+            "reasons": [_text(r, 200) for r in reasons if r][:4], "mood": mood,
+            "source": "ai", "scored_by": info["provider"],
+            "hashtags": [t for t in (moments._tag(h) for h in tags) if t and t != "shorts"][:8],
+            "transcript": text,
         })
+        if whole:
+            break
     out.sort(key=lambda m: -m["score"])
-    pin, pout = PRICES.get(model, (0, 0))
-    cost = (resp.usage.input_tokens * pin + resp.usage.output_tokens * pout) / 1e6
-    return out, {"model": resp.model, "input_tokens": resp.usage.input_tokens,
-                 "output_tokens": resp.usage.output_tokens, "cost_usd": round(cost, 3)}
-
-
-def friendly_error(e: Exception) -> str:
-    if isinstance(e, anthropic.AuthenticationError):
-        return "The Anthropic API key was rejected. Check it in Settings."
-    if isinstance(e, anthropic.RateLimitError):
-        return "Claude's rate limit was hit."
-    if isinstance(e, anthropic.APIStatusError):
-        return f"Claude API error {e.status_code}: {e.message}"
-    if isinstance(e, anthropic.APIConnectionError):
-        return "Could not reach the Claude API (check your internet connection)."
-    return str(e)
+    return out, info

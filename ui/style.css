@@ -110,7 +110,7 @@ fieldset label { display: flex; flex-direction: column; gap: 3px; }
 @media (max-width: 1100px) { aside { display: none; } }
 @media (max-width: 760px) { .clip { flex-direction: column; align-items: center; } .info { width: 100%; } }
 
-#new-job select { width: 150px; flex-shrink: 0; } #new-job #topic { width: 170px; flex: 0 0 auto; }
+#new-job select { width: 185px; flex-shrink: 0; } #new-job #topic { width: 170px; flex: 0 0 auto; }
 textarea { font: 12px Consolas, monospace; color: var(--text); background: #0b0c10; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; width: 100%; resize: vertical; margin-bottom: 6px; }
 .actions.left { justify-content: flex-start; }
 .modal { overflow-y: auto; max-height: 88vh; }
@@ -121,3 +121,14 @@ ol.hint { padding-left: 18px; }
 .yt-status.ok { color: var(--ok); } .yt-status.bad { color: var(--bad); }
 .job-head .actions { margin: 0; }
 fieldset label.row { flex-direction: row; }
+
+#pick-file { flex-shrink: 0; }
+body.dropping::after { content: "Drop the video to add it"; position: fixed; inset: 10px; border: 3px dashed var(--accent); border-radius: 16px; background: rgba(14,15,19,.85); display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 650; color: var(--accent); z-index: 100; pointer-events: none; }
+.progress-card .notice { margin: 8px 0 0; }
+
+.choice { display: flex !important; flex-direction: row !important; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; color: var(--text) !important; font-size: 14px !important; }
+.choice input { margin-top: 3px; accent-color: var(--accent); }
+.choice:has(input:checked) { border-color: var(--accent); }
+#ai-box { display: flex; flex-direction: column; gap: 8px; padding: 4px 0 0 4px; }
+#ai-key-row > span { display: flex; justify-content: space-between; }
+.model-row { display: flex; gap: 6px; }

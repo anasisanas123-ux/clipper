@@ -20,9 +20,11 @@ for _d in (JOBS, EXPORTS, MUSIC_MINE, MUSIC_LIB, MODELS, BIN):
     _d.mkdir(parents=True, exist_ok=True)
 
 DEFAULTS = {
-    "use_claude": True,              # only takes effect when an API key is available
-    "anthropic_api_key": "",
-    "claude_model": "claude-opus-5-5",
+    "scorer": "builtin",             # "builtin" (the local algorithm) or "ai" (a connected AI model)
+    "ai_provider": "anthropic",      # one of providers.PROVIDERS
+    "ai_keys": {},                   # provider -> API key (never sent to the UI)
+    "ai_models": {"anthropic": "claude-opus-5-5"},   # provider -> chosen model id
+    "custom_base_url": "",           # for the "other OpenAI-compatible" provider
     "whisper_model": "large-v3-turbo",
     "language": "",                  # "" = auto-detect
     "clip_count": 6,
@@ -42,11 +44,25 @@ DEFAULTS = {
 _lock = threading.Lock()
 
 
+def _migrate(raw: dict) -> dict:
+    """Older versions only knew Claude: carry its key, model and on/off switch over to the new settings."""
+    if "scorer" in raw:
+        return raw
+    key = (raw.pop("anthropic_api_key", "") or "").strip()
+    model = raw.pop("claude_model", "") or "claude-opus-5-5"
+    on = raw.pop("use_claude", True)
+    raw["ai_keys"] = {**raw.get("ai_keys", {}), **({"anthropic": key} if key else {})}
+    raw["ai_models"] = {**raw.get("ai_models", {}), "anthropic": model}
+    raw["ai_provider"] = "anthropic"
+    raw["scorer"] = "ai" if (on and key) else "builtin"
+    return raw
+
+
 def load_settings() -> dict:
-    s = dict(DEFAULTS)
+    s = json.loads(json.dumps(DEFAULTS))   # deep copy, so the dict defaults are never shared
     if SETTINGS_FILE.exists():
         try:
-            s.update(json.loads(SETTINGS_FILE.read_text("utf-8")))
+            s.update(_migrate(json.loads(SETTINGS_FILE.read_text("utf-8"))))
         except Exception:
             pass
     return s
@@ -56,18 +72,28 @@ def save_settings(patch: dict) -> dict:
     with _lock:
         s = load_settings()
         for k, v in patch.items():
-            if k in DEFAULTS and v is not None:
-                s[k] = type(DEFAULTS[k])(v) if not isinstance(DEFAULTS[k], bool) else bool(v)
+            if k not in DEFAULTS or v is None:
+                continue
+            d = DEFAULTS[k]
+            if isinstance(d, dict):
+                s[k] = {**s.get(k, {}), **{a: b for a, b in dict(v).items() if b is not None}}
+            elif isinstance(d, bool):
+                s[k] = bool(v)
+            else:
+                s[k] = type(d)(v)
         SETTINGS_FILE.write_text(json.dumps(s, indent=2), "utf-8")
         return s
 
 
-def api_key(settings: dict) -> str:
-    return (settings.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+def ai_key(settings: dict, provider: str) -> str:
+    key = (settings.get("ai_keys") or {}).get(provider, "")
+    if not key and provider == "anthropic":
+        key = os.environ.get("ANTHROPIC_API_KEY", "")
+    return key.strip()
 
 
-def claude_enabled(settings: dict) -> bool:
-    return bool(settings.get("use_claude")) and bool(api_key(settings))
+def ai_model(settings: dict, provider: str) -> str:
+    return ((settings.get("ai_models") or {}).get(provider) or "").strip()
 
 
 _ffmpeg = None

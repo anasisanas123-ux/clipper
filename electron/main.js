@@ -1,5 +1,5 @@
 // Desktop shell: starts the Python engine on a free local port and shows its UI in a window.
-const { app, BrowserWindow, shell, dialog } = require('electron');
+const { app, BrowserWindow, shell, dialog, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const net = require('net');
 const path = require('path');
@@ -54,7 +54,14 @@ async function start() {
   const win = new BrowserWindow({
     width: 1440, height: 920, minWidth: 980, minHeight: 640,
     backgroundColor: '#0e0f13', autoHideMenuBar: true, title: 'Clipper',
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'preload.js') },
+  });
+  ipcMain.handle('pick-video', async () => {
+    const r = await dialog.showOpenDialog(win, {
+      title: 'Choose a video', properties: ['openFile'],
+      filters: [{ name: 'Videos', extensions: ['mp4', 'mkv', 'mov', 'webm', 'avi', 'flv', 'm4v', 'ts'] }],
+    });
+    return r.canceled ? null : r.filePaths[0];
   });
   // Links to licences, song pages and so on open in the normal browser, not inside the app.
   win.webContents.setWindowOpenHandler(({ url }) => {

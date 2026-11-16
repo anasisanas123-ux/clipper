@@ -10,10 +10,12 @@
 <header>
   <div class="brand">Clipper</div>
   <form id="new-job">
-    <input id="url" type="text" placeholder="Paste a Kick VOD link (kick.com/…/videos/…)" autocomplete="off" spellcheck="false">
-    <select id="kind" title="What kind of stream this is">
+    <input id="url" type="text" placeholder="Paste a Kick or YouTube link, or drop a video file here" autocomplete="off" spellcheck="false">
+    <button type="button" id="pick-file" title="Use a video that's already on this PC">Add file</button>
+    <select id="kind" title="What kind of video this is">
       <option value="irl">IRL / chatting</option>
       <option value="gaming">Gaming</option>
+      <option value="podcast">Podcast / interview</option>
       <option value="film">Film / TV reaction</option>
     </select>
     <input id="topic" type="text" placeholder="Topic (e.g. GTA 6)" autocomplete="off">
@@ -25,13 +27,14 @@
 
 <div class="shell">
   <aside>
-    <h3>Streams</h3>
+    <h3>Videos</h3>
     <div id="job-list"></div>
   </aside>
   <main id="main">
     <div class="empty" id="empty">
-      <h1>Turn a Kick stream into Shorts</h1>
-      <p>Paste the link to a finished stream above. Clipper finds the strongest moments, reframes them to 9:16, adds captions, and shows a viral-chance score and a copyright risk check for each one.</p>
+      <h1>Turn long videos into Shorts</h1>
+      <p>Paste a Kick VOD or YouTube link above, or add a video file from this PC. Clipper finds the strongest moments, reframes them to 9:16, adds captions, and shows a viral-chance score and a copyright risk check for each one.</p>
+      <p>Pick the type first: Podcast scores what's said (hot takes, stories, big laughs), while Gaming and IRL lean on loud reactions. A file that's already Short-length is kept whole and just scored and captioned.</p>
     </div>
     <div id="job" hidden></div>
   </main>
@@ -41,18 +44,26 @@
   <form method="dialog" class="modal">
     <h2>Settings</h2>
     <fieldset>
-      <legend>Claude (smarter moment picking, titles and scores)</legend>
-      <label class="row"><input type="checkbox" id="s-use_claude"> Use the Claude API</label>
-      <p class="hint" id="s-claude-state"></p>
-      <label>Anthropic API key <input type="password" id="s-anthropic_api_key" autocomplete="off"></label>
-      <label>Model
-        <select id="s-claude_model">
-          <option value="claude-opus-5-5">Claude Opus 5.5 (default)</option>
-          <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (cheaper)</option>
-          <option value="claude-haiku-5-5">Claude Haiku 5.5 (cheapest)</option>
-          <option value="claude-fable-5-2">Claude Fable 5.2 (most capable, priciest)</option>
-        </select>
-      </label>
+      <legend>Virality scoring (picks the moments, scores them, writes titles and hashtags)</legend>
+      <label class="choice"><input type="radio" name="scorer" value="builtin">
+        <span><b>Built-in algorithm</b><br><span class="hint">Free and runs on this PC. Uses loudness and speech cues; titles are taken straight from the transcript.</span></span></label>
+      <label class="choice"><input type="radio" name="scorer" value="ai">
+        <span><b>Connected AI model</b><br><span class="hint">Reads the whole transcript, so it judges what's actually said and writes real titles and hooks. Needs an API key (except Ollama), and the transcript is sent to that provider.</span></span></label>
+      <div id="ai-box">
+        <label>Provider <select id="ai-provider"></select></label>
+        <label id="ai-base-row">Address (base URL) <input type="text" id="s-custom_base_url" placeholder="https://…/v1" spellcheck="false"></label>
+        <label id="ai-key-row"><span>API key <a id="ai-key-link" target="_blank">get a key</a></span>
+          <input type="password" id="ai-key" autocomplete="off"></label>
+        <label>Model
+          <span class="model-row">
+            <input type="text" id="ai-model" list="ai-model-list" placeholder="Load the list, or type a model id" spellcheck="false">
+            <datalist id="ai-model-list"></datalist>
+            <button type="button" id="ai-load">Load models</button>
+          </span>
+        </label>
+        <p class="hint" id="ai-note"></p>
+      </div>
+      <p class="hint" id="ai-state"></p>
     </fieldset>
     <fieldset>
       <legend>Clips</legend>

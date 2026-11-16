@@ -71,6 +71,31 @@ function openJob(id) {
   poll();
 }
 
+const openLogs = () => api('/api/open-folder', { body: { which: 'logs' } });
+
+// Local video files: the "Add file" button and drag-and-drop both put the file's path in the link box.
+const desktop = window.clipper;
+function useFile(path) {
+  if (!path) return;
+  $('#url').value = path;
+  $('#url').focus();
+  toast('File added. Pick the video type, then press Find clips.');
+}
+$('#pick-file').onclick = async () => {
+  if (!desktop) return toast('Paste the full path of the video file into the box instead.', true);
+  useFile(await desktop.pickVideo());
+};
+document.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('dropping'); });
+document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('dropping'); });
+document.addEventListener('drop', (e) => {
+  e.preventDefault();
+  document.body.classList.remove('dropping');
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  if (!desktop) return toast('Paste the full path of the video file into the box instead.', true);
+  useFile(desktop.pathForFile(file));
+});
+
 $('#new-job').addEventListener('submit', async (e) => {
   e.preventDefault();
   const url = $('#url').value.trim();
@@ -111,10 +136,15 @@ function renderJob(job) {
       h('div', { id: 'j-clips', class: 'clips' }));
   }
   $('#j-title').textContent = job.title || job.url;
-  const kinds = { irl: 'IRL', gaming: 'Gaming', film: 'Film / TV reaction' };
-  const bits = [job.streamer, [kinds[job.kind], job.topic].filter(Boolean).join(': '), job.duration ? fmtTime(job.duration) + ' long' : null];
+  const kinds = { irl: 'IRL', gaming: 'Gaming', film: 'Film / TV reaction', podcast: 'Podcast' };
+  const from = job.platform && job.platform !== 'local file' ? `${job.streamer} on ${job.platform}` : job.platform || job.streamer;
+  const bits = [from, [kinds[job.kind], job.topic].filter(Boolean).join(': '), job.duration ? fmtTime(job.duration) + ' long' : null];
   if (job.status === 'ready') {
-    bits.push(job.ai ? `scored by Claude (${job.ai.model}, about $${job.ai.cost_usd.toFixed(2)})` : 'scored on this PC, without Claude');
+    if (job.ai) {
+      const used = job.ai.cost_usd != null ? `about $${job.ai.cost_usd.toFixed(2)}`
+        : job.ai.input_tokens ? `${Math.round((job.ai.input_tokens + (job.ai.output_tokens || 0)) / 1000)}k tokens` : '';
+      bits.push(`scored by ${job.ai.provider || 'Claude'} (${[job.ai.model, used].filter(Boolean).join(', ')})`);
+    } else bits.push('scored by the built-in algorithm');
     if (job.engine) bits.push('speech recognition on ' + (job.engine.device === 'cuda' ? 'GPU' : 'CPU'));
   }
   $('#j-sub').textContent = bits.filter(Boolean).join(' · ');
@@ -122,12 +152,18 @@ function renderJob(job) {
   const status = $('#j-status');
   const parts = [];
   if (job.status === 'analyzing') {
+    // The engine stamps every progress update; a long silence means a step is genuinely stuck.
+    const quietMin = job.updated ? Math.floor((Date.now() / 1000 - job.updated) / 60) : 0;
     parts.push(h('div', { class: 'progress-card' },
-      h('div', {}, job.stage + (job.progress > 0 && job.progress < 1 ? ` (${Math.round(job.progress * 100)}%)` : '')),
+      h('div', {}, job.stage),
       h('div', { class: 'bar' }, h('div', { style: `width:${Math.max(3, job.progress * 100)}%` })),
-      h('div', { class: 'hint' }, 'A multi-hour stream takes a while: the audio is downloaded and transcribed before clips appear.')));
+      quietMin >= 5
+        ? h('div', { class: 'notice bad' }, `No progress for ${quietMin} minutes, so this step may be stuck. `,
+          h('button', { class: 'link', onclick: openLogs }, 'Open the log folder'), ' and send clipper.log for help.')
+        : h('div', { class: 'hint' }, 'Long videos take a while: the audio is downloaded and transcribed before clips appear.')));
   }
-  if (job.status === 'error') parts.push(h('div', { class: 'notice bad' }, 'This stream could not be processed. ', job.error || ''));
+  if (job.status === 'error') parts.push(h('div', { class: 'notice bad' }, 'This video could not be processed. ', job.error || '', ' ',
+    h('button', { class: 'link', onclick: openLogs }, 'Open the log folder')));
   for (const w of job.warnings || []) parts.push(h('div', { class: 'notice' }, w));
   status.replaceChildren(...parts);
 
@@ -252,7 +288,7 @@ function buildCard(job, clip) {
         h('div', { class: 'score ' + bandClass }, h('b', {}, String(clip.score)), h('small', {}, '/100')),
         h('div', {},
           h('div', { class: 'score-label' }, 'Viral chance: ' + bandText),
-          h('div', { class: 'hint' }, clip.source === 'claude' ? 'Claude\'s estimate from the transcript and audio' : 'Estimate from loudness and speech cues'))),
+          h('div', { class: 'hint' }, clip.source === 'ai' || clip.source === 'claude' ? `${clip.scored_by || 'Claude'}'s estimate from the transcript and audio` : 'Built-in estimate from loudness and speech cues'))),
       h('div', { class: 'bars' }, Object.entries(clip.breakdown || {}).map(([k, v]) =>
         h('div', { class: 'mini' }, h('span', {}, k), h('div', { class: 'bar' }, h('div', { style: `width:${v}%` })), h('em', {}, String(v))))),
       h('ul', { class: 'reasons' }, (clip.reasons || []).map((r) => h('li', {}, r))),
@@ -395,9 +431,69 @@ $('#music-close').onclick = () => { if (player) { player.pause(); player = null;
 $('#open-music-folder').onclick = () => api('/api/open-folder', { body: { which: 'music' } });
 
 // ---------- settings ----------
-const FIELDS = ['use_claude', 'anthropic_api_key', 'claude_model', 'clip_count', 'min_len', 'max_len', 'caption_style',
+const FIELDS = ['clip_count', 'min_len', 'max_len', 'caption_style', 'custom_base_url',
   'highlight', 'max_height', 'progress_bar', 'whisper_model', 'language', 'audd_api_key', 'jamendo_client_id',
   'schedule_times', 'youtube_privacy'];
+
+// Connected AI: one key and model per provider. Typed values are kept per provider while switching,
+// so trying a different provider doesn't wipe what was entered for the first.
+const AI_NOTES = {
+  anthropic: 'Roughly $0.05–0.50 per video, depending on its length and the model.',
+  ollama: 'Free and private: install Ollama, download a model in it, and keep it running. Long streams need a model with a large context window, and small local models pick weaker moments.',
+  groq: 'The free tier has low per-minute token limits, so long streams may be refused.',
+  openrouter: 'One key reaches many companies\' models, including some free ones.',
+  custom: 'Any service that offers the OpenAI Chat Completions API. Paste its base URL above.',
+};
+let drafts = {};
+const aiScorer = () => document.querySelector('input[name=scorer]:checked')?.value || 'builtin';
+
+function stashDraft() {
+  const p = $('#ai-provider').dataset.current;
+  if (p) drafts[p] = { key: $('#ai-key').value, model: $('#ai-model').value.trim() };
+}
+
+function showProvider(p) {
+  const s = state.settings, info = s.providers[p];
+  $('#ai-provider').dataset.current = p;
+  const d = drafts[p] || {};
+  $('#ai-key').value = d.key || '';
+  $('#ai-model').value = d.model ?? (s.ai_models[p] || '');
+  $('#ai-key').placeholder = s.key_hints[p] ? `saved (${s.key_hints[p]}), type to replace` : info.needs_key ? 'paste your API key' : 'optional';
+  $('#ai-key-link').href = info.key_url || '#';
+  $('#ai-key-link').hidden = !info.key_url;
+  $('#ai-key-link').textContent = p === 'ollama' ? 'download Ollama' : 'get a key';
+  $('#ai-base-row').hidden = p !== 'custom';
+  $('#ai-model-list').replaceChildren();
+  $('#ai-note').textContent = AI_NOTES[p] || 'Cost depends on the model you pick; see the provider\'s pricing page.';
+}
+
+function showScorer() {
+  $('#ai-box').hidden = aiScorer() !== 'ai';
+  const s = state.settings;
+  $('#ai-state').textContent = aiScorer() === 'builtin' ? 'Using the built-in algorithm.'
+    : s.ai_ready ? `Currently saved: ${s.ai_status}.` : `Not ready yet: ${s.ai_status}. Until it's set up, the built-in algorithm is used.`;
+}
+
+for (const r of document.querySelectorAll('input[name=scorer]')) r.onchange = showScorer;
+$('#ai-provider').onchange = () => { stashDraft(); showProvider($('#ai-provider').value); };
+$('#ai-load').onclick = async () => {
+  const p = $('#ai-provider').value;
+  const btn = $('#ai-load');
+  btn.disabled = true; btn.textContent = 'Loading…';
+  try {
+    const r = await api('/api/ai/models', { body: { provider: p, key: $('#ai-key').value.trim(), base_url: $('#s-custom_base_url').value.trim() } });
+    $('#ai-model-list').replaceChildren(...r.models.map((m) => h('option', { value: m })));
+    if (!$('#ai-model').value && r.models.includes('claude-opus-5-5')) $('#ai-model').value = 'claude-opus-5-5';
+    $('#ai-note').textContent = r.models.length
+      ? `Key works: ${r.models.length} models available. Click the Model box to pick one, or type its id.`
+      : 'Connected, but the provider listed no chat models.';
+    $('#ai-model').focus();
+  } catch (err) {
+    $('#ai-note').textContent = err.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Load models';
+  }
+};
 
 let ytPoll;
 function showYouTube(y) {
@@ -430,12 +526,13 @@ function fillSettings(s) {
     else if (el.type === 'password') el.value = '';
     else el.value = s[f] ?? '';
   }
-  $('#s-anthropic_api_key').placeholder = s.has_api_key ? `saved (${s.key_hint}) – type to replace` : 'sk-ant-…';
   $('#s-audd_api_key').placeholder = s.has_audd_key ? 'saved – type to replace' : 'optional';
-  $('#s-claude-state').textContent = s.claude_active
-    ? 'On. Each stream sends its transcript to Claude and costs roughly $0.05–0.50 depending on length and model.'
-    : s.has_api_key ? 'Off. Moments are picked and scored on this PC for free.'
-      : 'No API key saved, so moments are picked and scored on this PC for free. Add a key to turn Claude on.';
+  drafts = {};
+  $('#ai-provider').replaceChildren(...Object.entries(s.providers).map(([id, p]) => h('option', { value: id }, p.label)));
+  $('#ai-provider').value = s.ai_provider;
+  document.querySelector(`input[name=scorer][value=${s.scorer}]`).checked = true;
+  showProvider(s.ai_provider);
+  showScorer();
 }
 
 $('#open-settings').onclick = async () => {
@@ -452,8 +549,22 @@ $('#settings-save').onclick = async () => {
   }
   patch.max_height = +patch.max_height;
   if (patch.min_len >= patch.max_len) return toast('Shortest must be less than longest', true);
-  try { fillSettings(await api('/api/settings', { body: patch })); $('#settings').close(); toast('Settings saved'); }
-  catch (err) { toast(err.message, true); }
+  stashDraft();
+  const chosen = $('#ai-provider').value;
+  patch.scorer = aiScorer();
+  patch.ai_provider = chosen;
+  if (patch.scorer === 'ai' && !(drafts[chosen] || {}).model) return toast('Pick a model for the connected AI first (Load models, then choose one).', true);
+  try {
+    // Keys and models typed for other providers are saved too, then the chosen provider and the rest.
+    for (const [p, d] of Object.entries(drafts)) {
+      if (p !== chosen && (d.key || d.model)) await api('/api/settings', { body: { ai_provider: p, ai_key: d.key, ai_model: d.model } });
+    }
+    const mine = drafts[chosen] || {};
+    const s = await api('/api/settings', { body: { ...patch, ai_key: mine.key, ai_model: mine.model } });
+    fillSettings(s);
+    $('#settings').close();
+    toast(s.scorer === 'ai' && !s.ai_ready ? `Saved, but the connected AI isn't ready: ${s.ai_status}.` : 'Settings saved', s.scorer === 'ai' && !s.ai_ready);
+  } catch (err) { toast(err.message, true); }
 };
 
 // ---------- boot ----------
