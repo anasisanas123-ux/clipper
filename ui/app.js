@@ -236,16 +236,35 @@ function buildCard(job, clip) {
     } catch (err) { toast(err.message, true); }
   }
   const layout = h('select', {},
-    h('option', { value: 'auto' }, 'Auto'), h('option', { value: 'split' }, 'Facecam top, gameplay bottom'),
-    h('option', { value: 'crop' }, 'Centre crop'), h('option', { value: 'blur' }, 'Blurred background'));
+    h('option', { value: 'bars' }, 'Black bars'), h('option', { value: 'auto' }, 'Auto'),
+    h('option', { value: 'split' }, 'Facecam top, gameplay bottom'),
+    h('option', { value: 'crop' }, 'Centre crop (full screen)'), h('option', { value: 'blur' }, 'Blurred background (same video)'));
   const caps = h('select', {},
+    h('option', { value: 'meme' }, 'Meme caption (one line, whole clip)'),
     h('option', { value: 'pop' }, 'Word-by-word pop'), h('option', { value: 'karaoke' }, 'Karaoke line'),
     h('option', { value: 'clean' }, 'Clean'), h('option', { value: 'none' }, 'None'));
+  const zoom = h('input', { type: 'range', min: 30, max: 100, step: 1, value: clip.zoom || 73 });
+  const zoomLabel = h('span', {});
+  const zoomField = h('label', { class: 'field' }, zoomLabel, zoom);
+  const showZoom = () => {
+    zoomLabel.textContent = `Zoom: picture fills ${zoom.value}% of the height` + (+zoom.value >= 100 ? ' (no bars)' : '');
+    zoomField.hidden = !['bars', 'blur'].includes(layout.value);
+  };
+  zoom.addEventListener('input', showZoom);
+  layout.addEventListener('change', showZoom);
+  const meme = h('input', { type: 'text', value: clip.context || clip.hook || '', maxLength: 90,
+    placeholder: 'e.g. him explaining why he quit his job' });
+  const memeField = h('label', { class: 'field' }, h('span', {}, 'Meme caption text (shown the whole clip; asterisks and capitals are added)'), meme);
+  const hookField = h('label', { class: 'field' }, h('span', {}, 'Hook text (first 3 seconds)'), hook);
+  const showCaptionFields = () => { memeField.hidden = caps.value !== 'meme'; hookField.hidden = caps.value === 'meme'; };
+  caps.addEventListener('change', showCaptionFields);
   const colour = h('select', {}, ...['yellow', 'green', 'cyan', 'pink', 'orange', 'white'].map((c) => h('option', {}, c)));
   const song = h('select', {});
   const volume = h('input', { type: 'range', min: 0.03, max: 0.6, step: 0.01, value: clip.music_volume });
   const bar = h('input', { type: 'checkbox', checked: !!clip.progress_bar });
   layout.value = clip.layout; caps.value = clip.caption_style; colour.value = clip.highlight;
+  showCaptionFields();
+  showZoom();
   songOptions(song, clip.song);
 
   const draft = { start: clip.start, end: clip.end };
@@ -266,7 +285,7 @@ function buildCard(job, clip) {
   async function doRender() {
     try {
       await api(`/api/jobs/${job.id}/clips/${clip.id}/render`, { body: {
-        title: title.value, hook: hook.value, hashtags: parseTags(tags.value), layout: layout.value, caption_style: caps.value,
+        title: title.value, hook: hook.value, context: meme.value.trim(), zoom: +zoom.value, hashtags: parseTags(tags.value), layout: layout.value, caption_style: caps.value,
         highlight: colour.value, song: song.value, music_volume: +volume.value, progress_bar: bar.checked,
         start: draft.start, end: draft.end,
       } });
@@ -295,8 +314,9 @@ function buildCard(job, clip) {
       copyBox,
       h('div', { class: 'controls' },
         field('Title', title), field('Hashtags (#shorts is added automatically)', tags),
-        field('Hook text (first 3 seconds)', hook),
+        memeField, hookField,
         h('div', { class: 'grid2' }, field('Framing', layout, layoutNote), field('Captions', caps)),
+        zoomField,
         h('div', { class: 'grid2' }, field('Highlight', colour), field('Song', song)),
         h('div', { class: 'grid2' }, field('Song volume', volume),
           h('label', { class: 'row' }, bar, ' Progress bar')),
@@ -327,7 +347,7 @@ function buildCard(job, clip) {
     renderBtn.disabled = busy;
     renderBtn.textContent = busy ? 'Working…' : shown < 0 ? 'Render this clip' : 'Re-render with changes';
     exportBtn.disabled = busy || shown < 0;
-    layoutNote.textContent = c.used_layout && layout.value === 'auto' ? 'auto picked: ' + ({ split: 'facecam + gameplay', crop: 'centre crop', blur: 'blurred background' })[c.used_layout] : '';
+    layoutNote.textContent = c.used_layout && layout.value === 'auto' ? 'auto picked: ' + ({ split: 'facecam + gameplay', crop: 'centre crop', blur: 'blurred background', bars: 'black bars' })[c.used_layout] : '';
 
     const yt = c.youtube;
     const ytBusy = yt && ['queued', 'uploading', 'scheduled', 'uploaded'].includes(yt.status);
@@ -431,7 +451,7 @@ $('#music-close').onclick = () => { if (player) { player.pause(); player = null;
 $('#open-music-folder').onclick = () => api('/api/open-folder', { body: { which: 'music' } });
 
 // ---------- settings ----------
-const FIELDS = ['clip_count', 'min_len', 'max_len', 'caption_style', 'custom_base_url',
+const FIELDS = ['clip_count', 'min_len', 'max_len', 'default_layout', 'default_zoom', 'caption_style', 'custom_base_url',
   'highlight', 'max_height', 'progress_bar', 'whisper_model', 'language', 'audd_api_key', 'jamendo_client_id',
   'schedule_times', 'youtube_privacy'];
 

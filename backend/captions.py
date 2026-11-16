@@ -2,7 +2,7 @@
 import re
 
 HIGHLIGHTS = {  # ASS colours are &HBBGGRR
-    "yellow": "&H00F2FF&", "green": "&H66FF00&", "cyan": "&HFFE500&",
+    "yellow": "&H00F2FF&", "green": "&H14FF39&", "cyan": "&HFFE500&",
     "pink": "&H9A3DFF&", "orange": "&H0A8CFF&", "white": "&HFFFFFF&",
 }
 STYLES = {
@@ -55,13 +55,70 @@ def _groups(words, max_words, max_chars):
     return groups
 
 
-def build(words, duration, style="pop", highlight="yellow", hook="", layout="blur", offset=0.0) -> str:
+MEME_HEADER = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Meme,Montserrat Black,76,&H00{bgr},&H00{bgr},&H00000000,&H50000000,-1,0,0,0,100,100,1,0,1,9,4,2,60,60,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def _wrap(text: str, width: int = 20) -> list:
+    """Splits text into lines of about `width` characters without breaking words."""
+    lines, cur = [], ""
+    for word in text.split():
+        if cur and len(cur) + 1 + len(word) > width:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = f"{cur} {word}".strip()
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _meme(text: str, duration: float, highlight: str, layout: str, picture=None) -> str:
+    """One context caption for the whole clip: bold, all capitals, coloured, thick black outline, *in asterisks*."""
+    text = _clean(text).upper()
+    if text and not text.startswith("*"):
+        text = f"*{text}*"
+    bgr = HIGHLIGHTS.get(highlight, HIGHLIGHTS["green"]).strip("&H")
+    # Bottom edge of the text: low inside the picture for black bars, the lower third otherwise.
+    if picture:
+        top, ph = picture
+        bottom = int(top + ph * 0.83)       # same spot as the example: low on the picture, not on the bar
+    else:
+        bottom = {"split": 760}.get(layout, 1480)
+    out = MEME_HEADER.format(bgr=bgr)
+    if text:
+        body = "\\N".join(_wrap(text))
+        out += (f"Dialogue: 0,{_ts(0)},{_ts(duration)},Meme,,0,0,0,,"
+                f"{{\\an2\\pos(540,{bottom})\\fad(150,0)}}{body}\n")
+    return out
+
+
+def build(words, duration, style="pop", highlight="yellow", hook="", layout="blur", offset=0.0,
+          meme_text="", picture=None) -> str:
     """`words` are timed against the source clip; `offset` is where the final cut starts inside it."""
+    if style == "meme":
+        return _meme(meme_text or hook, duration, highlight, layout, picture)
     st = STYLES.get(style, STYLES["pop"])
     colour = HIGHLIGHTS.get(highlight, HIGHLIGHTS["yellow"])
     # split: on the seam between panels; blur: in the blurred band under the picture; crop: lower third
-    cap_y = {"split": 690, "blur": 1490}.get(layout, 1320)
-    hook_y = {"split": 110, "blur": 380}.get(layout, 250)
+    cap_y = {"split": 690}.get(layout, 1320)
+    hook_y = {"split": 110}.get(layout, 250)
+    if picture:
+        top, ph = picture
+        cap_y = int(top + ph * 0.78)                 # lower part of the picture
+        hook_y = max(60, top - 150) if top >= 200 else top + 40   # on the top bar when there's room
     lines = [HEADER.format(size=st["size"], hook_y=hook_y)]
 
     hook = _clean(hook)

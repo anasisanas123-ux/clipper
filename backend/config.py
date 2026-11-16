@@ -30,8 +30,10 @@ DEFAULTS = {
     "clip_count": 6,
     "min_len": 15,
     "max_len": 55,
-    "caption_style": "pop",
-    "highlight": "yellow",
+    "default_layout": "bars",        # framing for new clips: bars, blur, auto, split or crop
+    "default_zoom": 73,              # picture height as % of the screen for bars/blur (bigger = smaller bars)
+    "caption_style": "meme",
+    "highlight": "green",
     "progress_bar": True,
     "music_volume": 0.18,
     "audd_api_key": "",              # optional: names the song playing in a clip

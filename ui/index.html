@@ -73,8 +73,14 @@
         <label>Longest (sec) <input type="number" id="s-max_len" min="10" max="180"></label>
       </div>
       <div class="grid3">
+        <label>Default framing
+          <select id="s-default_layout"><option value="bars">Black bars</option><option value="blur">Blurred background (same video)</option><option value="auto">Auto</option><option value="crop">Centre crop (full screen)</option><option value="split">Facecam + gameplay</option></select>
+        </label>
+        <label>Default zoom (picture height %)
+          <input type="number" id="s-default_zoom" min="30" max="100" title="73 matches the example; higher means smaller bars">
+        </label>
         <label>Captions
-          <select id="s-caption_style"><option value="pop">Word-by-word pop</option><option value="karaoke">Karaoke line</option><option value="clean">Clean</option><option value="none">None</option></select>
+          <select id="s-caption_style"><option value="meme">Meme caption</option><option value="pop">Word-by-word pop</option><option value="karaoke">Karaoke line</option><option value="clean">Clean</option><option value="none">None</option></select>
         </label>
         <label>Highlight colour
           <select id="s-highlight"><option>yellow</option><option>green</option><option>cyan</option><option>pink</option><option>orange</option><option>white</option></select>

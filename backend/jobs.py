@@ -90,7 +90,7 @@ def queue_render(job_id, clip_id, patch=None):
     job = _jobs[job_id]
     clip = next(c for c in job["clips"] if c["id"] == clip_id)
     with _lock:
-        for k in ("layout", "caption_style", "highlight", "hook", "title", "hashtags", "song", "music_volume",
+        for k in ("layout", "zoom", "caption_style", "highlight", "hook", "context", "title", "hashtags", "song", "music_volume",
                   "progress_bar", "start", "end"):
             if patch and k in patch and patch[k] is not None:
                 clip[k] = patch[k]
@@ -189,12 +189,14 @@ def _analyze(job):
         raise RuntimeError("No usable moments found (the video may be silent or too short).")
 
     for i, m in enumerate(found[: max(n * 2, n + 3)]):
-        m.update(id=f"c{i + 1}", status="idle", error=None, version=0, layout="auto", layout_info=None,
+        m.update(id=f"c{i + 1}", status="idle", error=None, version=0, layout=settings.get("default_layout") or "bars", zoom=settings.get("default_zoom") or 73, layout_info=None,
                  caption_style=settings["caption_style"], highlight=settings["highlight"],
                  progress_bar=settings["progress_bar"], song="", music_volume=settings["music_volume"],
                  copyright=None, src_start=None, src_end=None, youtube=None)
         if not m.get("hashtags"):
             m["hashtags"] = moments.make_hashtags(job, m)
+        if not m.get("context"):
+            m["context"] = m["hook"]   # the built-in algorithm can only quote the transcript
         job["clips"].append(m)
     job["status"] = "ready"
     _stage(job, "Done", 1.0)

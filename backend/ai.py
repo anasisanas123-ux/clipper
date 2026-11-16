@@ -27,6 +27,10 @@ name any weakness that held the score down.
 
 `title` is the upload title: under 70 characters, specific to what happens, no hashtags. `hook` is the on-screen \
 text for the first three seconds: at most seven words that create curiosity without giving away the payoff. \
+`context` is a meme-style caption shown over the whole clip: one line of third-person narration, at most twelve \
+words, describing the situation the way a meme page would (for example "streamer realises chat was right the \
+whole time" or "him explaining why he quit his job"). Name the person if the transcript says who they are, \
+otherwise use "him", "her" or "bro". No asterisks, quotes or emojis; the app adds the styling. \
 `hashtags` is five to eight lowercase tags without the # sign, most specific first: the game, film or topic, \
 the streamer, then what happens in the clip. Leave out "shorts"; it is added automatically. \
 Do not invent events the transcript does not support."""
@@ -58,6 +62,7 @@ SCHEMA = {
                     "end_sec": {"type": "number"},
                     "title": {"type": "string"},
                     "hook": {"type": "string"},
+                    "context": {"type": "string"},
                     "virality": {"type": "integer"},
                     "hook_strength": {"type": "integer"},
                     "emotion": {"type": "integer"},
@@ -67,7 +72,7 @@ SCHEMA = {
                     "reasons": {"type": "array", "items": {"type": "string"}},
                     "hashtags": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["start_sec", "end_sec", "title", "hook", "virality", "hook_strength", "emotion",
+                "required": ["start_sec", "end_sec", "title", "hook", "context", "virality", "hook_strength", "emotion",
                              "self_contained", "shareability", "mood", "reasons", "hashtags"],
                 "additionalProperties": False,
             },
@@ -143,6 +148,7 @@ def pick_moments(segments, z, meta, settings, limit, local_candidates, whole=Fal
         out.append({
             "start": round(start, 2), "end": round(end, 2),
             "title": title, "hook": _text(m.get("hook"), 60) or title[:60],
+            "context": _text(m.get("context"), 90).strip("*\"' ") or _text(m.get("hook"), 60) or title[:60],
             "score": _num(m.get("virality")),
             "breakdown": {"hook": _num(m.get("hook_strength")), "emotion": _num(m.get("emotion")),
                           "stands alone": _num(m.get("self_contained")), "shareable": _num(m.get("shareability"))},

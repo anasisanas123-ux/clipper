@@ -36,10 +36,13 @@ def detect(video_path) -> dict:
         return info
     fw, fh = float(np.median(near[:, 2])), float(np.median(near[:, 3]))
     info["face_x"] = float(cx)
-    if fw >= W * 0.16:
-        info["layout"] = "crop"      # the streamer fills the frame (just chatting / IRL)
+    # A webcam overlay is small AND tucked into a corner of the frame. A face anywhere else is just the person
+    # in the shot (IRL, podcast, vlog), and splitting would show the same scene twice.
+    in_corner = (min(cx, W - cx) < W * 0.3) and (min(cy, H - cy) < H * 0.35)
+    if fw >= W * 0.16 or not in_corner:
+        info["layout"] = "crop"
         return info
-    # Small face = webcam overlay. Grow the face box into a panel-shaped box around it.
+    # Small face in a corner = webcam overlay. Grow the face box into a panel-shaped box around it.
     aspect = 1080 / TOP_H
     ch = min(H, fh * 2.8)
     cw = min(W, ch * aspect)

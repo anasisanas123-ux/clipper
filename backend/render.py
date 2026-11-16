@@ -1,11 +1,14 @@
 """Turns a source clip into the finished 1080x1920 Short with ffmpeg."""
+import os
 from pathlib import Path
 
 from . import captions, config
 from .layout import BOT_H, TOP_H
 
+DEFAULT_ZOOM = 73   # picture height as % of the screen in the bars/blurred layouts (about 1400 of 1920)
 
-def _video_chain(lay: dict, layout: str) -> str:
+
+def _video_chain(lay: dict, layout: str, zoom=None) -> str:
     W, H = lay["width"], lay["height"]
     if layout == "split" and lay.get("cam"):
         c = lay["cam"]
@@ -14,17 +17,46 @@ def _video_chain(lay: dict, layout: str) -> str:
                 f"[c0]crop={c['w']}:{c['h']}:{c['x']}:{c['y']},scale=1080:{TOP_H}[cam];"
                 f"[g0]crop={bw}:{H}:{(W - bw) // 2}:0,scale=1080:{BOT_H}[game];"
                 f"[cam][game]vstack[v0]")
+    if layout in ("bars", "blur"):
+        return _framed(lay, picture_height(lay, zoom), layout)
     if layout == "crop":
         cw = min(W, int(H * 9 / 16) // 2 * 2)
         cx = lay.get("face_x") or W / 2
         x = int(max(0, min(W - cw, cx - cw / 2)))
         return f"[0:v]crop={cw}:{H}:{x}:0,scale=1080:1920[v0]"
-    # blur: the whole picture, slightly zoomed, over a blurred copy of itself
+    return _framed(lay, picture_height(lay, zoom), "blur")
+
+
+def picture_height(lay: dict, zoom) -> int:
+    """Height of the picture inside the 1920 frame for the black-bars and blurred layouts.
+    zoom is that height as a % of the screen; the lowest setting shows the whole frame uncropped."""
+    W, H = lay["width"], lay["height"]
+    whole = int(1080 * H / W)                       # picture height with nothing cropped off the sides
+    want = int(1920 * float(zoom or DEFAULT_ZOOM) / 100)
+    return max(min(want, 1920), min(whole, 1920)) // 2 * 2
+
+
+def _framed(lay: dict, ph: int, bg: str) -> str:
+    """The picture (1080 wide, ph tall) in the middle of the frame, cropped around the face when one was
+    found. Above and below it: black, or a blurred, darkened, zoomed-in copy of the same video."""
+    W, H = lay["width"], lay["height"]
+    a = 1080 / ph
+    if W / H > a:
+        cw, ch = int(H * a) // 2 * 2, H // 2 * 2
+    else:
+        cw, ch = W // 2 * 2, int(W / a) // 2 * 2
+    cx = lay.get("face_x") or W / 2
+    x = int(max(0, min(W - cw, cx - cw / 2)))
+    y = (H - ch) // 2
+    top = (1920 - ph) // 2
+    pic = f"crop={cw}:{ch}:{x}:{y},scale=1080:{ph}"
+    if bg != "blur" or ph >= 1920:
+        return f"[0:v]{pic},pad=1080:1920:0:{top}:black[v0]"
     return ("[0:v]split[b0][f0];"
             "[b0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:3,"
             "eq=brightness=-0.12[bg];"
-            "[f0]scale=-2:800,crop='min(iw,1080)':800[fg];"
-            "[bg][fg]overlay=(W-w)/2:(H-h)/2[v0]")
+            f"[f0]{pic}[fg];"
+            f"[bg][fg]overlay=0:{top}[v0]")
 
 
 def render(job_dir: Path, clip: dict, words: list, out: Path, music_path=None) -> None:
@@ -35,15 +67,24 @@ def render(job_dir: Path, clip: dict, words: list, out: Path, music_path=None) -
     if layout == "split" and not clip["layout_info"].get("cam"):
         layout = "blur"
 
+    picture = None
+    if layout in ("bars", "blur"):
+        ph = picture_height(clip["layout_info"], clip.get("zoom"))
+        picture = ((1920 - ph) // 2, ph)            # where the picture sits, so captions can sit on it
+
     ass_name = f"{clip['id']}.ass"
     (job_dir / ass_name).write_text(
         captions.build(words, dur, clip["caption_style"], clip["highlight"], clip.get("hook", ""),
-                       layout, offset=clip["trim_start"]), "utf-8")
+                       layout, offset=clip["trim_start"], meme_text=clip.get("context", ""), picture=picture),
+        "utf-8")
 
-    fc = [_video_chain(clip["layout_info"], layout)]
+    fc = [_video_chain(clip["layout_info"], layout, clip.get("zoom"))]
     last = "v0"
     if clip.get("caption_style") != "none" or clip.get("hook"):
-        fc.append(f"[{last}]subtitles={ass_name}[v1]")
+        # The bundled caption font, given as a relative path because ffmpeg runs inside the job folder
+        # and a Windows drive letter's colon would break the filter syntax.
+        fonts = os.path.relpath(config.ROOT / "assets" / "fonts", job_dir).replace("\\", "/")
+        fc.append(f"[{last}]subtitles={ass_name}:fontsdir={fonts}[v1]")
         last = "v1"
     if clip.get("progress_bar"):
         fc.append(f"color=c=0xFFF200:s=1080x12:d={dur:.3f}[bar];"
