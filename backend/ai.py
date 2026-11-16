@@ -31,6 +31,11 @@ text for the first three seconds: at most seven words that create curiosity with
 words, describing the situation the way a meme page would (for example "streamer realises chat was right the \
 whole time" or "him explaining why he quit his job"). Name the person if the transcript says who they are, \
 otherwise use "him", "her" or "bro". No asterisks, quotes or emojis; the app adds the styling. \
+`story` is the text shown above the video in "story card" Shorts: 30 to 55 words that tell a stranger what is \
+going on and why it's interesting, like a fan page explaining the scene, ending on a line that makes them watch. \
+Wrap four to six key phrases (one to five words each) in square brackets; the app colours those phrases. \
+`comment` is one short line in the channel's own voice shown under the video: an opinion or take on the clip, \
+at most 25 words, no brackets. \
 `hashtags` is five to eight lowercase tags without the # sign, most specific first: the game, film or topic, \
 the streamer, then what happens in the clip. Leave out "shorts"; it is added automatically. \
 Do not invent events the transcript does not support."""
@@ -63,6 +68,8 @@ SCHEMA = {
                     "title": {"type": "string"},
                     "hook": {"type": "string"},
                     "context": {"type": "string"},
+                    "story": {"type": "string"},
+                    "comment": {"type": "string"},
                     "virality": {"type": "integer"},
                     "hook_strength": {"type": "integer"},
                     "emotion": {"type": "integer"},
@@ -72,7 +79,7 @@ SCHEMA = {
                     "reasons": {"type": "array", "items": {"type": "string"}},
                     "hashtags": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["start_sec", "end_sec", "title", "hook", "context", "virality", "hook_strength", "emotion",
+                "required": ["start_sec", "end_sec", "title", "hook", "context", "story", "comment", "virality", "hook_strength", "emotion",
                              "self_contained", "shareability", "mood", "reasons", "hashtags"],
                 "additionalProperties": False,
             },
@@ -149,6 +156,7 @@ def pick_moments(segments, z, meta, settings, limit, local_candidates, whole=Fal
             "start": round(start, 2), "end": round(end, 2),
             "title": title, "hook": _text(m.get("hook"), 60) or title[:60],
             "context": _text(m.get("context"), 90).strip("*\"' ") or _text(m.get("hook"), 60) or title[:60],
+            "story": _text(m.get("story"), 400), "comment": _text(m.get("comment"), 200),
             "score": _num(m.get("virality")),
             "breakdown": {"hook": _num(m.get("hook_strength")), "emotion": _num(m.get("emotion")),
                           "stands alone": _num(m.get("self_contained")), "shareable": _num(m.get("shareability"))},

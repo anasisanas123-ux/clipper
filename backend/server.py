@@ -11,7 +11,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, jobs, music, providers, sources, youtube
+from . import config, effects, jobs, music, providers, sources, youtube
 
 app = FastAPI(title="Clipper")
 
@@ -116,6 +116,30 @@ def render_clip(job_id: str, clip_id: str, patch: dict = Body(default={})):
     if not any(c["id"] == clip_id for c in job["clips"]):
         raise HTTPException(404, "Clip not found")
     return jobs.queue_render(job_id, clip_id, patch)
+
+
+@app.post("/api/jobs/{job_id}/clips/{clip_id}/effects/suggest")
+def suggest_effects(job_id: str, clip_id: str, body: dict = Body(default={})):
+    job = _job(job_id)
+    clip = next((c for c in job["clips"] if c["id"] == clip_id), None)
+    if not clip:
+        raise HTTPException(404, "Clip not found")
+    return jobs.suggest_effects(job, clip, body.get("preset") or "edit", start=body.get("start"), end=body.get("end"))
+
+
+@app.get("/api/effects")
+def effects_catalog():
+    return {"sounds": effects.sounds(), "visuals": effects.VISUALS, "emojis": effects.EMOJIS,
+            "filters": {k: v[0] for k, v in effects.FILTERS.items()}, "presets": effects.PRESETS,
+            "folder": str(effects.SFX_MINE)}
+
+
+@app.get("/api/sfx/{kind}/{name}")
+def sfx_file(kind: str, name: str):
+    path, _ = effects.resolve_sound(f"{kind}/{name}")
+    if not path:
+        raise HTTPException(404)
+    return FileResponse(path)
 
 
 @app.post("/api/jobs/{job_id}/clips/{clip_id}/export")
@@ -226,7 +250,8 @@ def music_file(kind: str, name: str):
 
 @app.post("/api/open-folder")
 def open_folder(body: dict = Body(...)):
-    target = {"music": config.MUSIC_MINE, "exports": config.EXPORTS, "logs": config.DATA}.get(body.get("which"))
+    target = {"music": config.MUSIC_MINE, "exports": config.EXPORTS, "logs": config.DATA,
+              "sfx": effects.SFX_MINE}.get(body.get("which"))
     if not target:
         raise HTTPException(400, "Unknown folder")
     subprocess.Popen(["explorer", str(target)])

@@ -35,6 +35,11 @@ DEFAULTS = {
     "caption_style": "meme",
     "highlight": "green",
     "progress_bar": True,
+    "effects_preset": "edit",        # automatic effects style for new clips: none, subtle, edit, hype, cinematic
+    "sfx_volume": 0.7,
+    "channel_name": "",              # shown at the top of "story card" Shorts
+    "channel_handle": "",
+    "channel_avatar": "",            # optional picture file for the story card header
     "music_volume": 0.18,
     "audd_api_key": "",              # optional: names the song playing in a clip
     "jamendo_client_id": "",         # optional: popularity-ranked free music

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import ai, audio, config, copyright, layout, moments, music, providers, render, sources, transcribe, youtube
+from . import ai, audio, config, copyright, effects, layout, moments, music, providers, render, sources, transcribe, youtube
 
 log = logging.getLogger("clipper")
 KINDS = ("irl", "gaming", "film", "podcast")
@@ -90,10 +90,16 @@ def queue_render(job_id, clip_id, patch=None):
     job = _jobs[job_id]
     clip = next(c for c in job["clips"] if c["id"] == clip_id)
     with _lock:
+        old_start = clip["start"]
         for k in ("layout", "zoom", "caption_style", "highlight", "hook", "context", "title", "hashtags", "song", "music_volume",
-                  "progress_bar", "start", "end"):
+                  "progress_bar", "start", "end", "effects_preset", "filter", "effects", "sfx_volume", "story", "comment"):
             if patch and k in patch and patch[k] is not None:
                 clip[k] = patch[k]
+        if clip.get("effects") and clip["start"] != old_start:
+            # effect times are from the clip start: keep them on the same moment when the start moves
+            shift = old_start - clip["start"]
+            clip["effects"] = [dict(e, t=round(e["t"] + shift, 2)) for e in clip["effects"]
+                               if 0 <= e["t"] + shift < clip["end"] - clip["start"]]
         if clip["end"] - clip["start"] < 5:
             clip["end"] = clip["start"] + 5
         if job.get("duration"):
@@ -192,11 +198,15 @@ def _analyze(job):
         m.update(id=f"c{i + 1}", status="idle", error=None, version=0, layout=settings.get("default_layout") or "bars", zoom=settings.get("default_zoom") or 73, layout_info=None,
                  caption_style=settings["caption_style"], highlight=settings["highlight"],
                  progress_bar=settings["progress_bar"], song="", music_volume=settings["music_volume"],
-                 copyright=None, src_start=None, src_end=None, youtube=None)
+                 copyright=None, src_start=None, src_end=None, youtube=None,
+                 effects_preset=settings.get("effects_preset") or "edit", filter=None, effects=None,
+                 sfx_volume=settings.get("sfx_volume", 0.7))
         if not m.get("hashtags"):
             m["hashtags"] = moments.make_hashtags(job, m)
         if not m.get("context"):
             m["context"] = m["hook"]   # the built-in algorithm can only quote the transcript
+        m.setdefault("story", m.get("title") or "")
+        m.setdefault("comment", "")
         job["clips"].append(m)
     job["status"] = "ready"
     _stage(job, "Done", 1.0)
@@ -302,10 +312,17 @@ def _render(job, clip):
         wav.unlink(missing_ok=True)
     words = json.loads(words_file.read_text("utf-8"))
 
-    step("Rendering")
-    song_path, song_entry = music.resolve(clip.get("song") or "")
     trim_start = clip["start"] - clip["src_start"]
     trim_end = clip["end"] - clip["src_start"]
+    if clip.get("effects") is None:
+        fx = suggest_effects(job, clip, clip.get("effects_preset") or settings.get("effects_preset"), words)
+        if clip.get("filter"):
+            fx.pop("filter")            # the user already picked one
+        clip.update(fx)
+    clip["effects"] = effects.clean(clip["effects"], trim_end - trim_start)
+
+    step("Rendering")
+    song_path, song_entry = music.resolve(clip.get("song") or "")
     spec = dict(clip, src=src.name, trim_start=trim_start, trim_end=trim_end, layout=chosen)
     tmp = d / f"{cid}.tmp.mp4"
     render.render(d, spec, words, tmp, song_path)
@@ -321,6 +338,35 @@ def _render(job, clip):
         cut.unlink(missing_ok=True)
     clip.update(status="ready", step="", used_layout=chosen, version=clip.get("version", 0) + 1)
     _save(job)
+
+
+def _excitement(job):
+    f = _dir(job["id"]) / "excitement.npy"
+    return np.load(f) if f.exists() else None
+
+
+def suggest_effects(job, clip, preset, words=None, start=None, end=None) -> dict:
+    """Automatic effects for a clip (optionally for a draft start/end the user hasn't rendered yet)."""
+    c = dict(clip, start=clip["start"] if start is None else float(start), end=clip["end"] if end is None else float(end))
+    if words is None:
+        f = _dir(job["id"]) / f"{clip['id']}_words.json"
+        words = json.loads(f.read_text("utf-8")) if f.exists() else []
+    if words and clip.get("src_start") is not None:
+        offset = c["start"] - clip["src_start"]
+    else:
+        # no word timings yet: use the transcript's sentence timings, which are on the video's timeline
+        words = [{"start": s["start"], "text": s["text"]} for s in moments_segments(job)
+                 if c["start"] <= s["start"] < c["end"]]
+        offset = c["start"]
+    return effects.suggest(preset, c, _excitement(job), words, offset)
+
+
+def moments_segments(job):
+    f = _dir(job["id"]) / "transcript.json"
+    try:
+        return json.loads(f.read_text("utf-8")) if f.exists() else []
+    except Exception:
+        return []
 
 
 def export(job_id, clip_id) -> str:

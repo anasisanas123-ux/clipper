@@ -238,9 +238,11 @@ function buildCard(job, clip) {
   const layout = h('select', {},
     h('option', { value: 'bars' }, 'Black bars'), h('option', { value: 'auto' }, 'Auto'),
     h('option', { value: 'split' }, 'Facecam top, gameplay bottom'),
-    h('option', { value: 'crop' }, 'Centre crop (full screen)'), h('option', { value: 'blur' }, 'Blurred background (same video)'));
+    h('option', { value: 'crop' }, 'Centre crop (full screen)'), h('option', { value: 'blur' }, 'Blurred background (same video)'),
+    h('option', { value: 'story' }, 'Story card (text above, video in a box)'));
   const caps = h('select', {},
     h('option', { value: 'meme' }, 'Meme caption (one line, whole clip)'),
+    h('option', { value: 'edit' }, 'Edit captions (coloured keywords, mid-screen)'),
     h('option', { value: 'pop' }, 'Word-by-word pop'), h('option', { value: 'karaoke' }, 'Karaoke line'),
     h('option', { value: 'clean' }, 'Clean'), h('option', { value: 'none' }, 'None'));
   const zoom = h('input', { type: 'range', min: 30, max: 100, step: 1, value: clip.zoom || 73 });
@@ -249,7 +251,14 @@ function buildCard(job, clip) {
   const showZoom = () => {
     zoomLabel.textContent = `Zoom: picture fills ${zoom.value}% of the height` + (+zoom.value >= 100 ? ' (no bars)' : '');
     zoomField.hidden = !['bars', 'blur'].includes(layout.value);
+    storyFields.hidden = layout.value !== 'story';
   };
+  const storyText = h('textarea', { rows: 3, maxLength: 400, value: clip.story || clip.title || '',
+    placeholder: 'What is happening and why it matters. Put [square brackets] around phrases to colour them.' });
+  const comment = h('input', { type: 'text', maxLength: 200, value: clip.comment || '', placeholder: 'optional: your take, shown under the video' });
+  const storyFields = h('div', { class: 'controls-sub' },
+    h('label', { class: 'field' }, h('span', {}, 'Story text above the video ([brackets] = coloured; channel name is set in Settings)'), storyText),
+    h('label', { class: 'field' }, h('span', {}, 'Comment under the video'), comment));
   zoom.addEventListener('input', showZoom);
   layout.addEventListener('change', showZoom);
   const meme = h('input', { type: 'text', value: clip.context || clip.hook || '', maxLength: 90,
@@ -287,7 +296,8 @@ function buildCard(job, clip) {
       await api(`/api/jobs/${job.id}/clips/${clip.id}/render`, { body: {
         title: title.value, hook: hook.value, context: meme.value.trim(), zoom: +zoom.value, hashtags: parseTags(tags.value), layout: layout.value, caption_style: caps.value,
         highlight: colour.value, song: song.value, music_volume: +volume.value, progress_bar: bar.checked,
-        start: draft.start, end: draft.end,
+        start: draft.start, end: draft.end, story: storyText.value.trim(), comment: comment.value.trim(),
+        ...fx.value(),
       } });
       poll();
     } catch (err) { toast(err.message, true); }
@@ -300,6 +310,7 @@ function buildCard(job, clip) {
   }
 
   const field = (label, control, extra) => h('label', { class: 'field' }, h('span', {}, label), control, extra);
+  const fx = buildEffects(job, clip, () => ({ start: draft.start, end: draft.end }), video);
   const el = h('article', { class: 'clip' },
     h('div', { class: 'player' }, video, overlay),
     h('div', { class: 'info' },
@@ -316,7 +327,7 @@ function buildCard(job, clip) {
         field('Title', title), field('Hashtags (#shorts is added automatically)', tags),
         memeField, hookField,
         h('div', { class: 'grid2' }, field('Framing', layout, layoutNote), field('Captions', caps)),
-        zoomField,
+        zoomField, storyFields,
         h('div', { class: 'grid2' }, field('Highlight', colour), field('Song', song)),
         h('div', { class: 'grid2' }, field('Song volume', volume),
           h('label', { class: 'row' }, bar, ' Progress bar')),
@@ -326,7 +337,8 @@ function buildCard(job, clip) {
             h('button', { onclick: nudge('start', 1), title: 'Start 1s later' }, 'start ▶'),
             range,
             h('button', { onclick: nudge('end', -1), title: 'End 1s earlier' }, '◀ end'),
-            h('button', { onclick: nudge('end', 1), title: 'End 1s later' }, 'end ▶')))),
+            h('button', { onclick: nudge('end', 1), title: 'End 1s later' }, 'end ▶'))),
+        fx.el),
       h('div', { class: 'actions' }, renderBtn, exportBtn),
       h('div', { class: 'yt' }, h('span', { class: 'hint' }, 'YouTube'), h('div', { class: 'yt-row' }, ytButtons), ytStatus)));
 
@@ -338,6 +350,7 @@ function buildCard(job, clip) {
       video.src = `/media/${job.id}/${c.id}.mp4?v=${c.version}`;
     }
     video.hidden = shown < 0;
+    fx.sync(c);
     if (busy) overlay.replaceChildren(h('div', { class: 'spinner' }), h('div', {}, c.status === 'queued' ? 'Waiting in line' : (c.step || 'Working')));
     else if (c.status === 'error') overlay.replaceChildren(h('div', { class: 'bad' }, 'Render failed'), h('div', { class: 'hint' }, c.error || ''));
     else if (c.status === 'idle') overlay.replaceChildren(h('div', {}, 'Not rendered yet'), h('div', { class: 'hint' }, `${fmtTime(c.start)} in the stream`));
@@ -371,6 +384,101 @@ function buildCard(job, clip) {
     }
   }
   return { el, update, refreshSongs: () => songOptions(song, song.value) };
+}
+
+// ---------- effects and sounds ----------
+async function loadEffects() {
+  try { state.fx = await api('/api/effects'); } catch { state.fx = null; }
+}
+
+function soundOptions(select, current) {
+  const sounds = (state.fx && state.fx.sounds) || [];
+  const groups = [h('option', { value: '' }, 'No sound')];
+  const built = sounds.filter((s) => s.source === 'builtin'), mine = sounds.filter((s) => s.source === 'mine');
+  if (built.length) groups.push(h('optgroup', { label: 'Built-in' }, built.map((s) => h('option', { value: s.id }, s.name))));
+  if (mine.length) groups.push(h('optgroup', { label: 'My sounds' }, mine.map((s) => h('option', { value: s.id }, '★ ' + s.name))));
+  select.replaceChildren(...groups);
+  select.value = sounds.some((s) => s.id === current) ? current : '';
+}
+
+function buildEffects(job, clip, getRange, video) {
+  const cat = state.fx || { presets: {}, filters: {}, visuals: {}, emojis: [], sounds: [] };
+  let events = (clip.effects || []).map((e) => ({ ...e }));
+  let touched = false;
+  const opts = (obj) => Object.entries(obj).map(([k, v]) => h('option', { value: k }, v));
+  const preset = h('select', {}, ...opts(cat.presets));
+  const filter = h('select', {}, ...opts(cat.filters));
+  const vol = h('input', { type: 'range', min: 0, max: 1.5, step: 0.05, value: clip.sfx_volume ?? 0.7 });
+  preset.value = clip.effects_preset || 'edit';
+  filter.value = clip.filter || (preset.value === 'none' ? 'none' : preset.value === 'cinematic' ? 'cinematic' : preset.value === 'edit' ? 'edit' : 'vivid');
+  const list = h('div', { class: 'fx-list' });
+  const note = h('p', { class: 'hint' });
+  const changed = () => { touched = true; };
+
+  function row(e) {
+    const t = h('input', { type: 'number', min: 0, step: 0.1, value: e.t, title: 'Seconds from the start of the Short' });
+    t.addEventListener('change', () => { e.t = Math.max(0, +t.value || 0); changed(); });
+    const go = h('button', { class: 'mini-btn', title: 'Jump the preview here', onclick: () => { if (!video.hidden) { video.currentTime = e.t; video.play(); } } }, '⏵');
+    const vis = h('select', {}, ...opts(cat.visuals));
+    vis.value = e.fx;
+    const emoji = h('select', { class: 'emoji' }, ...cat.emojis.map((x) => h('option', { value: x }, x)));
+    emoji.value = e.emoji || '💀';
+    const showEmoji = () => { emoji.hidden = !['emoji', 'ending'].includes(vis.value); };
+    vis.addEventListener('change', () => { e.fx = vis.value; if (!e.emoji) e.emoji = emoji.value; showEmoji(); changed(); });
+    emoji.addEventListener('change', () => { e.emoji = emoji.value; changed(); });
+    showEmoji();
+    const snd = h('select', {});
+    soundOptions(snd, e.sound);
+    snd.addEventListener('change', () => { e.sound = snd.value; changed(); });
+    const play = h('button', { class: 'mini-btn', title: 'Hear this sound' }, '▶');
+    play.onclick = () => snd.value && preview('/api/sfx/' + snd.value.split('/').map(encodeURIComponent).join('/'), play);
+    const del = h('button', { class: 'mini-btn danger', title: 'Remove', onclick: () => { events = events.filter((x) => x !== e); changed(); draw(); } }, '✕');
+    return h('div', { class: 'fx-row' }, t, go, vis, emoji, snd, play, del);
+  }
+  function draw() {
+    events.sort((a, b) => a.t - b.t);
+    list.replaceChildren(...(events.length ? events.map(row)
+      : [h('p', { class: 'hint' }, clip.effects == null && !touched ? 'Effects are placed on the loud moments when this clip renders, or press "Suggest" now.' : 'No effects. Add one below.')]));
+  }
+  async function suggest() {
+    try {
+      const r = await api(`/api/jobs/${job.id}/clips/${clip.id}/effects/suggest`, { body: { preset: preset.value, ...getRange() } });
+      events = r.effects; filter.value = r.filter; touched = true; draw();
+    } catch (err) { toast(err.message, true); }
+  }
+  preset.addEventListener('change', suggest);
+  const add = h('button', { onclick: () => {
+    const t = video.hidden ? 0 : Math.round(video.currentTime * 10) / 10;
+    events.push({ t, fx: 'punch', sound: 'builtin/hit', emoji: '💀' });
+    changed(); draw();
+  } }, '+ Add effect at the preview\'s current time');
+  draw();
+  const el = h('details', { class: 'fx' },
+    h('summary', {}, 'Effects, filters and sound effects'),
+    h('div', { class: 'grid3' },
+      h('label', { class: 'field' }, h('span', {}, 'Style (fills in the list below)'), preset),
+      h('label', { class: 'field' }, h('span', {}, 'Colour filter'), filter),
+      h('label', { class: 'field' }, h('span', {}, 'Sound effects volume'), vol)),
+    h('div', { class: 'fx-head hint' }, h('span', {}, 'Time (s)'), h('span', {}, 'Visual effect'), h('span', {}, 'Sound')),
+    list,
+    h('div', { class: 'fx-actions' }, add, h('button', { onclick: suggest }, 'Suggest again'),
+      h('button', { class: 'link', onclick: () => api('/api/open-folder', { body: { which: 'sfx' } }) }, 'Add my own sounds (opens the folder)'),
+      h('button', { class: 'link', onclick: async () => { await loadEffects(); draw(); } }, 'Refresh sounds')),
+    note);
+  note.textContent = 'Pause the preview where you want an effect, then add it. Changes show after "Re-render with changes".';
+  return {
+    el,
+    value: () => ({ effects_preset: preset.value, filter: filter.value, sfx_volume: +vol.value,
+      effects: touched || clip.effects != null ? events.map(({ t, fx, sound, emoji }) => ({ t, fx, sound, emoji })) : undefined }),
+    sync(c) {
+      if (!touched && c.effects && JSON.stringify(c.effects) !== JSON.stringify(events)) {
+        events = c.effects.map((e) => ({ ...e }));
+        clip.effects = c.effects;
+        if (c.filter) filter.value = c.filter;
+        draw();
+      }
+    },
+  };
 }
 
 // ---------- music ----------
@@ -449,11 +557,12 @@ for (const tab of document.querySelectorAll('.tabs button')) {
 $('#open-music').onclick = () => { loadTracks(); $('#music').showModal(); };
 $('#music-close').onclick = () => { if (player) { player.pause(); player = null; } $('#music').close(); };
 $('#open-music-folder').onclick = () => api('/api/open-folder', { body: { which: 'music' } });
+$('#open-sfx-folder').onclick = () => api('/api/open-folder', { body: { which: 'sfx' } });
 
 // ---------- settings ----------
 const FIELDS = ['clip_count', 'min_len', 'max_len', 'default_layout', 'default_zoom', 'caption_style', 'custom_base_url',
   'highlight', 'max_height', 'progress_bar', 'whisper_model', 'language', 'audd_api_key', 'jamendo_client_id',
-  'schedule_times', 'youtube_privacy'];
+  'schedule_times', 'youtube_privacy', 'effects_preset', 'sfx_volume', 'channel_name', 'channel_handle', 'channel_avatar'];
 
 // Connected AI: one key and model per provider. Typed values are kept per provider while switching,
 // so trying a different provider doesn't wipe what was entered for the first.
@@ -590,5 +699,6 @@ $('#settings-save').onclick = async () => {
 // ---------- boot ----------
 (async () => {
   try { state.tracks = (await api('/api/music')).tracks; } catch {}
+  await loadEffects();
   await refreshJobs();
 })();
