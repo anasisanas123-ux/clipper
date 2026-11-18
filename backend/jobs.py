@@ -44,6 +44,9 @@ def load_all():
             continue
         if (job.get("hd") or {}).get("status") == "downloading":
             job["hd"].update(status="error", error="Interrupted when the app closed")   # resumes on next render
+        if job["status"] == "live":
+            job["status"] = "ready"
+            (job.get("live") or {}).update(recording=False, state="Stopped when the app closed")
         if job["status"] == "analyzing":
             job["status"], job["error"] = "error", "The app was closed while this video was being analysed."
         for c in job.get("clips", []):
@@ -79,6 +82,9 @@ def create(url: str, kind: str = "irl", topic: str = "") -> dict:
 
 
 def delete(job_id):
+    if (_jobs.get(job_id) or {}).get("status") == "live":
+        from . import live
+        live.stop(job_id, wait=True)
     with _lock:
         job = _jobs.pop(job_id, None)
     if job:
@@ -143,6 +149,10 @@ def _analyze(job):
     meta = sources.probe(job["url"])
     job.update(title=meta["title"], streamer=meta["streamer"], duration=meta.get("duration"),
                local=meta["local"], platform=meta["platform"], source_url=meta.get("webpage_url") or job["url"])
+    if meta.get("is_live"):
+        from . import live
+        live.start(job)
+        return
     if sources.needs_full_download(job["platform"]):
         _start_hd_download(job, settings)
 
@@ -196,26 +206,33 @@ def _analyze(job):
         raise RuntimeError("No usable moments found (the video may be silent or too short).")
 
     for i, m in enumerate(found[: max(n * 2, n + 3)]):
-        m.update(id=f"c{i + 1}", status="idle", error=None, version=0, layout=settings.get("default_layout") or "bars", zoom=settings.get("default_zoom") or 73, layout_info=None,
-                 caption_style=settings["caption_style"], highlight=settings["highlight"],
-                 progress_bar=settings["progress_bar"], song="", music_volume=settings["music_volume"],
-                 copyright=None, src_start=None, src_end=None, youtube=None,
-                 effects_preset=settings.get("effects_preset") or "edit", filter=None, effects=None,
-                 sfx_volume=settings.get("sfx_volume", 0.7), tighten=settings.get("tighten", True),
-                 cold_open=settings.get("cold_open", False), track_face=True, beat_sync=True,
-                 showing=None, preview_version=0)
-        if not m.get("hashtags"):
-            m["hashtags"] = moments.make_hashtags(job, m)
-        if not m.get("context"):
-            m["context"] = m["hook"]   # the built-in algorithm can only quote the transcript
-        m.setdefault("story", m.get("title") or "")
-        m.setdefault("comment", "")
+        init_clip(job, m, f"c{i + 1}", settings)
         job["clips"].append(m)
     job["status"] = "ready"
     _stage(job, "Done", 1.0)
     log.info("[%s] %d moments found", job["id"], len(job["clips"]))
     for c in job["clips"][:n]:
         queue_render(job["id"], c["id"])
+
+
+def init_clip(job, m, cid, settings):
+    """Fills in a newly found moment's editing settings from the defaults."""
+    m.update(id=cid, status="idle", error=None, version=0, layout=settings.get("default_layout") or "bars",
+             zoom=settings.get("default_zoom") or 73, layout_info=None,
+             caption_style=settings["caption_style"], highlight=settings["highlight"],
+             progress_bar=settings["progress_bar"], song="", music_volume=settings["music_volume"],
+             copyright=None, src_start=m.get("src_start"), src_end=m.get("src_end"), youtube=None,
+             effects_preset=settings.get("effects_preset") or "edit", filter=None, effects=None,
+             sfx_volume=settings.get("sfx_volume", 0.7), tighten=settings.get("tighten", True),
+             cold_open=settings.get("cold_open", False), track_face=True, beat_sync=True,
+             showing=None, preview_version=0)
+    if not m.get("hashtags"):
+        m["hashtags"] = moments.make_hashtags(job, m)
+    if not m.get("context"):
+        m["context"] = m["hook"]   # the built-in algorithm can only quote the transcript
+    m.setdefault("story", m.get("title") or "")
+    m.setdefault("comment", "")
+    return m
 
 
 _hd_threads: dict = {}
@@ -284,7 +301,14 @@ def _render(job, clip, preview=False):
 
     covered = (src.exists() and clip["src_start"] is not None
                and clip["src_start"] <= clip["start"] and clip["end"] <= clip["src_end"])
+    if not covered and job.get("live_mode") and src.exists() and clip["src_start"] is not None:
+        # A live stream can't be fetched again: keep the cut inside what was recorded around the moment.
+        clip["start"] = max(clip["start"], clip["src_start"])
+        clip["end"] = min(clip["end"], clip["src_end"])
+        covered = True
     if not covered:
+        if job.get("live_mode"):
+            raise RuntimeError("This part of the live stream wasn't kept, so the clip can't be cut again.")
         if sources.needs_full_download(job.get("platform", "")):
             _wait_for_hd(job, step)
         step("Cutting the clip in full quality")
@@ -608,7 +632,7 @@ def _friendly(e: Exception) -> str:
     if "private video" in low or "members-only" in low or "join this channel" in low:
         return "That video is private or members-only, so Clipper can't download it."
     if "unsupported url" in low:
-        return "Clipper doesn't recognise that link. Paste a Kick VOD or YouTube video link, or add a video file."
+        return "Clipper doesn't recognise that link. Paste a Kick, YouTube or Twitch link, or add a video file."
     return text[-800:]
 
 

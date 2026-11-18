@@ -59,8 +59,9 @@ def probe(url: str) -> dict:
         info = y.extract_info(url, download=False)
     if info.get("_type") == "playlist":
         raise RuntimeError("That's a playlist or channel page. Paste the link to one video.")
-    if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):
-        raise RuntimeError("That link is live or hasn't started. Paste the link once the stream has ended.")
+    if info.get("live_status") == "is_upcoming":
+        raise RuntimeError("That stream hasn't started yet. Paste the link again once it's live.")
+    is_live = bool(info.get("is_live") or info.get("live_status") == "is_live")
     return {
         "title": info.get("title") or "Video",
         "streamer": info.get("uploader") or info.get("channel") or info.get("uploader_id") or "unknown",
@@ -68,6 +69,7 @@ def probe(url: str) -> dict:
         "local": False,
         "platform": _platform(info),
         "webpage_url": info.get("webpage_url") or url,
+        "is_live": is_live,
     }
 
 
@@ -80,6 +82,22 @@ def hires_source(url: str, max_height: int) -> dict:
            f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best")
     with _ydl({"skip_download": True, "noplaylist": True, "format": fmt}) as y:
         info = y.extract_info(url, download=False)
+    parts = info.get("requested_formats")
+    if parts and len(parts) == 2:
+        v = next(p for p in parts if p.get("vcodec") not in (None, "none"))
+        a = next(p for p in parts if p is not v)
+        return {"url": v["url"], "audio_url": a["url"], "headers": v.get("http_headers") or {}}
+    return {"url": info["url"], "audio_url": None, "headers": info.get("http_headers") or {}}
+
+
+def live_source(url: str, max_height: int):
+    """The live stream's address(es) and headers, or None when it's no longer live. YouTube serves live video
+    and audio as separate streams, so this can return an audio_url too."""
+    fmt = f"bv*[height<={max_height}]+ba/b[height<={max_height}]/bv*+ba/b"
+    with _ydl({"skip_download": True, "noplaylist": True, "format": fmt}) as y:
+        info = y.extract_info(url, download=False)
+    if not (info.get("is_live") or info.get("live_status") == "is_live"):
+        return None
     parts = info.get("requested_formats")
     if parts and len(parts) == 2:
         v = next(p for p in parts if p.get("vcodec") not in (None, "none"))
@@ -144,7 +162,7 @@ def extract_wav(src: Path, wav: Path, start=None, dur=None) -> None:
     config.run_ffmpeg([*args, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav], timeout=7200)
 
 
-def _http_args(headers: dict) -> list:
+def http_args(headers: dict) -> list:
     args = []
     ua = headers.get("User-Agent")
     if ua:
@@ -158,7 +176,7 @@ def _http_args(headers: dict) -> list:
 def download_segment(source: dict, start: float, end: float, out: Path) -> None:
     """Frame-exact cut of [start, end] re-encoded at high quality."""
     remote = not is_local(source["url"])
-    http = _http_args(source.get("headers") or {}) if remote else []
+    http = http_args(source.get("headers") or {}) if remote else []
     seek = ["-ss", f"{max(0, start):.3f}"]
     args = [*http, *seek, "-i", source["url"]]
     amap = ["-map", "0:a:0?"]

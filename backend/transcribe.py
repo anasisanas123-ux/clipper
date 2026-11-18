@@ -14,6 +14,7 @@ from . import config
 log = logging.getLogger("clipper")
 _models: dict = {}
 _lock = threading.Lock()
+_run_lock = threading.Lock()   # one transcription at a time: live analysis and renders share the model
 _gpu = None
 
 # Approximate download sizes, for showing progress while a model downloads.
@@ -120,6 +121,11 @@ def words_model(settings) -> str:
 
 
 def transcribe_full(wav, settings, duration, status) -> tuple:
+    with _run_lock:
+        return _transcribe_full(wav, settings, duration, status)
+
+
+def _transcribe_full(wav, settings, duration, status) -> tuple:
     """Segment-level transcript of the entire video. Returns (segments, info for the job)."""
     name = full_pass_model(settings)
     model, device = _load(name, status)
@@ -152,6 +158,11 @@ def transcribe_full(wav, settings, duration, status) -> tuple:
 
 
 def transcribe_words(wav, settings, status=None) -> list:
+    with _run_lock:
+        return _transcribe_words(wav, settings, status)
+
+
+def _transcribe_words(wav, settings, status=None) -> list:
     """Word-level timestamps for one clip, used to time the captions."""
     model, _ = _load(words_model(settings), status)
     if status:

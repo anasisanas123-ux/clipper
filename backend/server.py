@@ -11,7 +11,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import ai, config, effects, jobs, music, performance, providers, sources, updater, youtube
+from . import ai, config, effects, jobs, live, music, performance, providers, sources, updater, youtube
 
 app = FastAPI(title="Clipper")
 
@@ -149,6 +149,30 @@ def clip_ideas(job_id: str, clip_id: str):
         return ai.ideas(job, clip, settings)
     except Exception as e:
         raise HTTPException(502, providers.friendly(e, settings["ai_provider"]))
+
+
+@app.post("/api/jobs/{job_id}/live/stop")
+def live_stop(job_id: str):
+    job = _job(job_id)
+    if job.get("status") != "live":
+        raise HTTPException(400, "This video isn't recording.")
+    live.stop(job_id)
+    return {"ok": True}
+
+
+@app.post("/api/jobs/{job_id}/live/resume")
+def live_resume(job_id: str):
+    job = _job(job_id)
+    if not job.get("live_mode") or job.get("status") == "live":
+        raise HTTPException(400, "This video isn't a stopped live recording.")
+    try:
+        src = sources.live_source(job.get("source_url") or job["url"], int(config.load_settings()["max_height"]))
+    except Exception as e:
+        raise HTTPException(400, f"Couldn't reach the stream: {e}")
+    if not src:
+        raise HTTPException(400, "The stream isn't live any more.")
+    live.start(job)
+    return {"ok": True}
 
 
 @app.post("/api/jobs/{job_id}/clips/{clip_id}/apply-style")

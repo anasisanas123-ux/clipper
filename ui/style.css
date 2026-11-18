@@ -162,3 +162,9 @@ body.dropping::after { content: "Drop the video to add it"; position: fixed; ins
 .actions .link { margin-right: auto; }
 #results-summary p { margin: 4px 0; }
 .field > .link { align-self: flex-start; font-size: 12px; }
+
+.live-dot { color: #ff3b3b; font-weight: 800; letter-spacing: .04em; margin-right: 6px; }
+.live-card.on { border-color: #5a2626; }
+.live-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.live-row button { margin-left: auto; }
+.job-sub .live-dot { font-size: 11px; }

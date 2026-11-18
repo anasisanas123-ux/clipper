@@ -55,7 +55,7 @@ async function refreshJobs() {
     class: 'job-item' + (j.id === state.jobId ? ' active' : ''), onclick: () => openJob(j.id),
   },
     h('div', { class: 'job-title' }, j.title || j.url),
-    h('div', { class: 'job-sub' }, [j.streamer, j.status === 'analyzing' ? 'working…' : j.status === 'error' ? 'failed' : j.clips + ' moments'].filter(Boolean).join(' · ')),
+    h('div', { class: 'job-sub' }, j.status === 'live' ? h('span', { class: 'live-dot' }, '● LIVE') : '', [j.streamer, j.status === 'analyzing' ? 'working…' : j.status === 'error' ? 'failed' : j.clips + ' moments'].filter(Boolean).join(' · ')),
   )));
   if (!jobs.length) list.append(h('p', { class: 'hint' }, 'Nothing yet.'));
 }
@@ -119,7 +119,7 @@ async function poll() {
   state.job = job;
   renderJob(job);
   if (statusChanged) refreshJobs();
-  const busy = job.status === 'analyzing' || job.clips.some((c) => c.status === 'queued' || c.status === 'rendering');
+  const busy = job.status === 'analyzing' || job.status === 'live' || job.clips.some((c) => c.status === 'queued' || c.status === 'rendering');
   pollTimer = setTimeout(poll, busy ? 1200 : 5000);
 }
 
@@ -165,6 +165,21 @@ function renderJob(job) {
           h('button', { class: 'link', onclick: openLogs }, 'Open the log folder'), ' and send clipper.log for help.')
         : h('div', { class: 'hint' }, 'Long videos take a while: the audio is downloaded and transcribed before clips appear.')));
   }
+  if (job.live_mode) {
+    const lv = job.live || {};
+    const rec = job.status === 'live';
+    const found = job.clips.length;
+    parts.push(h('div', { class: 'progress-card live-card' + (rec ? ' on' : '') },
+      h('div', { class: 'live-row' },
+        rec ? h('span', { class: 'live-dot' }, '● LIVE') : h('span', { class: 'hint' }, 'Live recording'),
+        h('b', {}, lv.state || ''),
+        h('span', { class: 'hint' }, `${fmtTime(lv.recorded || 0)} recorded · ${found} clip${found === 1 ? '' : 's'} found`),
+        rec ? h('button', { class: 'danger', disabled: !!lv.stopping, onclick: stopLive }, lv.stopping ? 'Stopping…' : 'Stop recording')
+          : h('button', { onclick: resumeLive, title: 'Start recording again if the stream is still live' }, 'Resume recording')),
+      lv.error ? h('div', { class: 'notice bad' }, lv.error) : null,
+      rec ? h('div', { class: 'hint' }, 'Clipper records the stream in 2-minute pieces and checks each one for moments as it finishes, so the first clips appear a few minutes in. Only moments scoring at least ' +
+        (state.settings.live_min_score || 60) + ' become clips (change it in Settings). Keep Clipper open while it records.') : null));
+  }
   if (job.status === 'error') parts.push(h('div', { class: 'notice bad' }, 'This video could not be processed. ', job.error || '', ' ',
     h('button', { class: 'link', onclick: openLogs }, 'Open the log folder')));
   for (const w of job.warnings || []) parts.push(h('div', { class: 'notice' }, w));
@@ -180,6 +195,15 @@ function renderJob(job) {
     }
     card.update(clip);
   }
+}
+
+async function stopLive() {
+  if (!confirm('Stop recording? Clips already found are kept, and the last few minutes are still checked for moments.')) return;
+  try { await api(`/api/jobs/${state.jobId}/live/stop`, { method: 'POST' }); poll(); } catch (err) { toast(err.message, true); }
+}
+
+async function resumeLive() {
+  try { await api(`/api/jobs/${state.jobId}/live/resume`, { method: 'POST' }); toast('Recording again'); poll(); } catch (err) { toast(err.message, true); }
 }
 
 async function batch(path, body, what) {
@@ -658,7 +682,7 @@ $('#open-sfx-folder').onclick = () => api('/api/open-folder', { body: { which: '
 // ---------- settings ----------
 const FIELDS = ['clip_count', 'min_len', 'max_len', 'default_layout', 'default_zoom', 'caption_style', 'custom_base_url',
   'highlight', 'max_height', 'progress_bar', 'whisper_model', 'language', 'audd_api_key', 'jamendo_client_id',
-  'schedule_times', 'youtube_privacy', 'effects_preset', 'sfx_volume', 'channel_name', 'channel_handle', 'channel_avatar', 'tighten', 'cold_open'];
+  'schedule_times', 'youtube_privacy', 'effects_preset', 'sfx_volume', 'channel_name', 'channel_handle', 'channel_avatar', 'tighten', 'cold_open', 'live_min_score', 'live_auto_render'];
 
 // Connected AI: one key and model per provider. Typed values are kept per provider while switching,
 // so trying a different provider doesn't wipe what was entered for the first.

@@ -38,7 +38,9 @@ DEFAULTS = {
     "effects_preset": "edit",        # automatic effects style for new clips: none, subtle, edit, hype, cinematic
     "sfx_volume": 0.7,
     "tighten": True,                 # cut silent pauses out of new clips (jump cuts)
-    "cold_open": False,              # start new clips with a 2-second teaser of the payoff
+    "cold_open": False,
+    "live_min_score": 60,            # live streams: only moments scoring at least this become clips
+    "live_auto_render": True,        # live streams: render new clips as soon as they're found              # start new clips with a 2-second teaser of the payoff
     "channel_name": "",              # shown at the top of "story card" Shorts
     "channel_handle": "",
     "channel_avatar": "",            # optional picture file for the story card header
@@ -138,27 +140,54 @@ def run_ffmpeg(args: list, cwd=None, timeout=3600) -> None:
         raise RuntimeError("ffmpeg failed: " + (p.stderr or "").strip()[-1500:])
 
 
+# Hardware video encoders tried in order; the first one that works on this PC is used for every render.
+ENCODERS = {
+    "nvenc": ("h264_nvenc", ["-preset", "p5", "-rc", "vbr", "-b:v", "0"], lambda q: ["-cq", str(q)], "NVIDIA GPU"),
+    "amf": ("h264_amf", ["-quality", "balanced", "-rc", "cqp"],
+            lambda q: ["-qp_i", str(q), "-qp_p", str(q + 2), "-qp_b", str(q + 4)], "AMD GPU"),
+    "qsv": ("h264_qsv", ["-preset", "medium"], lambda q: ["-global_quality", str(q + 2)], "Intel graphics"),
+}
+
+
+def _try_encoder(key) -> str:
+    """'' when the encoder works on this PC, otherwise ffmpeg's error."""
+    name, opts, quality, _ = ENCODERS[key]
+    try:
+        run_ffmpeg(["-f", "lavfi", "-i", "color=c=gray:s=640x360:d=0.3", "-c:v", name, *opts, *quality(21),
+                    "-pix_fmt", "yuv420p", "-f", "null", "-"], timeout=30)
+        return ""
+    except Exception as e:
+        return str(e)
+
+
 def video_encoder() -> list:
-    """NVENC when the GPU supports it, otherwise x264."""
-    global _nvenc
+    """The fastest encoder that works here: NVIDIA, AMD or Intel hardware, otherwise x264 on the CPU."""
+    global _nvenc, gpu_note
     if _nvenc is None:
-        try:
-            run_ffmpeg(["-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2", "-c:v", "h264_nvenc",
-                        "-f", "null", "-"], timeout=30)
-            _nvenc = True
-        except Exception as e:
-            _nvenc = False
-            global gpu_note
-            text = str(e)
-            import re as _re
-            m = _re.search(r"minimum required Nvidia driver for nvenc is ([\d.]+)", text)
-            if m:
-                gpu_note = (f"Your NVIDIA graphics driver is too old for fast GPU video encoding (it needs version "
-                            f"{m.group(1)} or newer), so videos are encoded on the CPU, which is several times "
-                            f"slower. Update the driver with the NVIDIA app or from nvidia.com, then restart Clipper.")
-    return ["h264_nvenc", "-preset", "p5", "-rc", "vbr", "-b:v", "0"] if _nvenc else ["libx264", "-preset", "veryfast"]
+        _nvenc = ""
+        for key in ENCODERS:
+            err = _try_encoder(key)
+            if not err:
+                _nvenc = key
+                break
+            if key == "nvenc":
+                import re as _re
+                m = _re.search(r"minimum required Nvidia driver for nvenc is ([\d.]+)", err)
+                if m:
+                    gpu_note = (f"Your NVIDIA graphics driver is too old for fast GPU video encoding (it needs version "
+                                f"{m.group(1)} or newer), so videos are encoded on the CPU, which is several times "
+                                f"slower. Update the driver with the NVIDIA app or from nvidia.com, then restart Clipper.")
+    if _nvenc:
+        name, opts, _, _ = ENCODERS[_nvenc]
+        return [name, *opts]
+    return ["libx264", "-preset", "veryfast"]
+
+
+def encoder_label() -> str:
+    video_encoder()
+    return ENCODERS[_nvenc][3] if _nvenc else "CPU"
 
 
 def quality_args(q: int) -> list:
     video_encoder()
-    return ["-cq", str(q)] if _nvenc else ["-crf", str(q)]
+    return ENCODERS[_nvenc][2](q) if _nvenc else ["-crf", str(q)]

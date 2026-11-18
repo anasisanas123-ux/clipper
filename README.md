@@ -4,6 +4,8 @@ Desktop app that finds the strongest moments in a long video and turns them into
 
 Sources: Kick VODs, YouTube videos, or video files already on your PC (button or drag-and-drop). A file that's already Short-length is kept whole and just scored and captioned.
 
+Live streams: paste the link of a Kick, YouTube or Twitch stream that's live right now. Clipper records it in 2-minute pieces, checks each piece for moments as it finishes, and turns the ones scoring above a threshold (Settings → Live streams) into clips straight away. It stops when you press Stop or the stream ends; old pieces are deleted as it goes, so a long stream doesn't fill the disk.
+
 Video types: IRL, Gaming, Podcast / interview, and Film / TV reaction. Each type weighs moments differently; Podcast looks for quotable lines (hot takes, stories, numbers, advice) rather than loud reactions.
 
 ## Editing

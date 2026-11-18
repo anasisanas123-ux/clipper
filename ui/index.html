@@ -10,7 +10,7 @@
 <header>
   <div class="brand">Clipper</div>
   <form id="new-job">
-    <input id="url" type="text" placeholder="Paste a Kick or YouTube link, or drop a video file here" autocomplete="off" spellcheck="false">
+    <input id="url" type="text" placeholder="Paste a Kick, YouTube or Twitch link (past video or live now), or drop a video file" autocomplete="off" spellcheck="false">
     <button type="button" id="pick-file" title="Use a video that's already on this PC">Add file</button>
     <select id="kind" title="What kind of video this is">
       <option value="irl">IRL / chatting</option>
@@ -34,7 +34,7 @@
   <main id="main">
     <div class="empty" id="empty">
       <h1>Turn long videos into Shorts</h1>
-      <p>Paste a Kick VOD or YouTube link above, or add a video file from this PC. Clipper finds the strongest moments, reframes them to 9:16, adds captions, and shows a viral-chance score and a copyright risk check for each one.</p>
+      <p>Paste a Kick, YouTube or Twitch link above (a past video, or a stream that's live right now), or add a video file from this PC. Clipper finds the strongest moments, reframes them to 9:16, adds captions, and shows a viral-chance score and a copyright risk check for each one.</p>
       <p>Pick the type first: Podcast scores what's said (hot takes, stories, big laughs), while Gaming and IRL lean on loud reactions. A file that's already Short-length is kept whole and just scored and captioned.</p>
     </div>
     <div id="job" hidden></div>
@@ -114,6 +114,14 @@
         </label>
       </div>
       <p class="hint">Leave the name and handle empty to hide the header. Without a picture, the first letter of the name is shown in a circle.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Live streams</legend>
+      <p class="hint">Paste the link of a stream that's live right now: Clipper records it and finds clips every 2 minutes while it runs.</p>
+      <div class="grid3">
+        <label>Lowest score that becomes a clip <input type="number" id="s-live_min_score" min="0" max="100"></label>
+      </div>
+      <label class="row"><input type="checkbox" id="s-live_auto_render"> Render live clips as soon as they're found</label>
     </fieldset>
     <fieldset>
       <legend>Speech recognition (runs on this PC)</legend>
