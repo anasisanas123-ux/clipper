@@ -11,7 +11,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, effects, jobs, music, providers, sources, youtube
+from . import ai, config, effects, jobs, music, performance, providers, sources, updater, youtube
 
 app = FastAPI(title="Clipper")
 
@@ -27,6 +27,8 @@ def _public_settings():
     s["ai_ready"], s["ai_status"] = ready, why
     s["providers"] = {p: {k: v[k] for k in ("label", "needs_key", "key_url", "base")}
                       for p, v in providers.PROVIDERS.items()}
+    config.video_encoder()
+    s["gpu_note"] = config.gpu_note
     return s
 
 
@@ -115,7 +117,7 @@ def render_clip(job_id: str, clip_id: str, patch: dict = Body(default={})):
     job = _job(job_id)
     if not any(c["id"] == clip_id for c in job["clips"]):
         raise HTTPException(404, "Clip not found")
-    return jobs.queue_render(job_id, clip_id, patch)
+    return jobs.queue_render(job_id, clip_id, patch, preview=bool(patch.pop("preview", False)))
 
 
 @app.post("/api/jobs/{job_id}/clips/{clip_id}/effects/suggest")
@@ -124,7 +126,104 @@ def suggest_effects(job_id: str, clip_id: str, body: dict = Body(default={})):
     clip = next((c for c in job["clips"] if c["id"] == clip_id), None)
     if not clip:
         raise HTTPException(404, "Clip not found")
-    return jobs.suggest_effects(job, clip, body.get("preset") or "edit", start=body.get("start"), end=body.get("end"))
+    return jobs.suggest_effects(job, clip, body.get("preset") or "edit", start=body.get("start"), end=body.get("end"),
+                                tighten=body.get("tighten"), cold_open=body.get("cold_open"), song=body.get("song"))
+
+
+def _clip(job, clip_id):
+    clip = next((c for c in job["clips"] if c["id"] == clip_id), None)
+    if not clip:
+        raise HTTPException(404, "Clip not found")
+    return clip
+
+
+@app.post("/api/jobs/{job_id}/clips/{clip_id}/ideas")
+def clip_ideas(job_id: str, clip_id: str):
+    job = _job(job_id)
+    clip = _clip(job, clip_id)
+    settings = config.load_settings()
+    ready, why = providers.readiness(settings)
+    if not ready:
+        raise HTTPException(400, f"Title ideas need a connected AI model ({why}). Set one up in Settings.")
+    try:
+        return ai.ideas(job, clip, settings)
+    except Exception as e:
+        raise HTTPException(502, providers.friendly(e, settings["ai_provider"]))
+
+
+@app.post("/api/jobs/{job_id}/clips/{clip_id}/apply-style")
+def apply_style(job_id: str, clip_id: str):
+    job = _job(job_id)
+    _clip(job, clip_id)
+    return {"queued": jobs.apply_style(job_id, clip_id)}
+
+
+@app.post("/api/jobs/{job_id}/render-all")
+def render_all(job_id: str, body: dict = Body(default={})):
+    _job(job_id)
+    return {"queued": jobs.render_all(job_id, preview=bool(body.get("preview")))}
+
+
+@app.post("/api/jobs/{job_id}/export-all")
+def export_all(job_id: str):
+    _job(job_id)
+    paths = jobs.export_all(job_id)
+    return {"count": len(paths), "folder": str(config.EXPORTS)}
+
+
+SHARE = {"tiktok": "https://www.tiktok.com/tiktokstudio/upload",
+         "instagram": "https://www.instagram.com/"}
+
+
+@app.post("/api/jobs/{job_id}/clips/{clip_id}/share")
+def share(job_id: str, clip_id: str, body: dict = Body(default={})):
+    """Upload helper for TikTok and Instagram Reels: exports the file, shows it in Explorer, and returns the
+    caption to copy and the upload page to open."""
+    job = _job(job_id)
+    clip = _clip(job, clip_id)
+    platform = body.get("platform")
+    if platform not in SHARE:
+        raise HTTPException(400, "Unknown platform")
+    try:
+        path = jobs.export(job_id, clip_id)
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e))
+    subprocess.Popen(["explorer", "/select,", path])
+    tags = " ".join("#" + t for t in (clip.get("hashtags") or [])[:5])
+    caption = f"{clip['title']} {tags}".strip()
+    return {"path": path, "caption": caption, "url": SHARE[platform]}
+
+
+@app.get("/api/performance")
+def get_performance():
+    return performance.cached()
+
+
+@app.post("/api/performance/refresh")
+def refresh_performance():
+    try:
+        return performance.refresh([jobs.get(j["id"]) for j in jobs.list_jobs()])
+    except Exception as e:
+        raise HTTPException(400, f"Couldn't read your YouTube numbers: {e}")
+
+
+@app.post("/api/performance/reset")
+def reset_learning():
+    performance.reset_learning()
+    return {"ok": True}
+
+
+@app.get("/api/update")
+def check_update():
+    return updater.check()
+
+
+@app.post("/api/update")
+def apply_update():
+    try:
+        return updater.apply()
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/effects")
@@ -204,11 +303,11 @@ def youtube_disconnect():
 
 
 @app.get("/media/{job_id}/{clip_id}.mp4")
-def media(job_id: str, clip_id: str):
+def media(job_id: str, clip_id: str, kind: str = "full"):
     job = _job(job_id)
     if not any(c["id"] == clip_id for c in job["clips"]):
         raise HTTPException(404)
-    path = config.JOBS / job_id / f"{clip_id}.mp4"
+    path = config.JOBS / job_id / (f"{clip_id}_preview.mp4" if kind == "preview" else f"{clip_id}.mp4")
     if not path.exists():
         raise HTTPException(404)
     return FileResponse(path, media_type="video/mp4")

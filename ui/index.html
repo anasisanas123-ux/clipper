@@ -22,6 +22,7 @@
     <button class="primary" type="submit">Find clips</button>
   </form>
   <button id="open-music">Music</button>
+  <button id="open-results" title="How your uploaded Shorts actually did">Results</button>
   <button id="open-settings">Settings</button>
 </header>
 
@@ -90,6 +91,8 @@
         </label>
       </div>
       <label class="row"><input type="checkbox" id="s-progress_bar"> Progress bar along the bottom of each Short</label>
+      <label class="row"><input type="checkbox" id="s-tighten"> Cut silent pauses out of new clips (jump cuts; loud action is never cut)</label>
+      <label class="row"><input type="checkbox" id="s-cold_open"> Start new clips with a 2-second teaser of the payoff (cold open)</label>
     </fieldset>
     <fieldset>
       <legend>Effects and sound effects (each clip can be changed on its own)</legend>
@@ -106,7 +109,9 @@
       <div class="grid3">
         <label>Channel name <input type="text" id="s-channel_name" placeholder="e.g. DETERMINED"></label>
         <label>Handle <input type="text" id="s-channel_handle" placeholder="@yourchannel"></label>
-        <label>Profile picture (optional) <input type="text" id="s-channel_avatar" placeholder="full path to a .png or .jpg" spellcheck="false"></label>
+        <label>Profile picture (optional)
+          <span class="model-row"><input type="text" id="s-channel_avatar" placeholder="none" spellcheck="false"><button type="button" id="pick-avatar">Browse</button></span>
+        </label>
       </div>
       <p class="hint">Leave the name and handle empty to hide the header. Without a picture, the first letter of the name is shown in a circle.</p>
     </fieldset>
@@ -149,11 +154,37 @@
       <label>AudD API key (names the exact song playing in a clip) <input type="password" id="s-audd_api_key" autocomplete="off"></label>
       <label>Jamendo client ID (ranks free music by this week's popularity) <input type="text" id="s-jamendo_client_id" autocomplete="off"></label>
     </fieldset>
+    <fieldset>
+      <legend>Speed and updates</legend>
+      <p class="notice" id="gpu-note" hidden></p>
+      <div class="actions left">
+        <button type="button" id="update-check">Check for updates</button>
+        <button type="button" id="update-apply" hidden>Update now</button>
+        <button type="button" id="restart-app" hidden>Restart Clipper</button>
+      </div>
+      <p class="hint" id="update-state"></p>
+    </fieldset>
     <div class="actions">
       <button type="button" id="settings-cancel">Cancel</button>
       <button type="button" class="primary" id="settings-save">Save</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="results">
+  <div class="modal wide">
+    <h2>Results</h2>
+    <p class="hint">Real numbers from YouTube for the Shorts you uploaded with Clipper, next to the viral chance Clipper gave them.
+      Once a video type has 8 public uploads older than 3 days, the built-in algorithm re-weights its signals toward what got
+      views on your channel (half your results, half the defaults).</p>
+    <div class="actions left">
+      <button type="button" class="primary" id="results-refresh">Get the latest numbers</button>
+      <button type="button" class="link" id="results-reset">Undo what it learned</button>
+    </div>
+    <div id="results-summary"></div>
+    <div id="results-list" class="list"></div>
+    <div class="actions"><button type="button" id="results-close">Close</button></div>
+  </div>
 </dialog>
 
 <dialog id="music">

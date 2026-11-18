@@ -63,6 +63,14 @@ async function start() {
     });
     return r.canceled ? null : r.filePaths[0];
   });
+  ipcMain.handle('pick-image', async () => {
+    const r = await dialog.showOpenDialog(win, {
+      title: 'Choose a profile picture', properties: ['openFile'],
+      filters: [{ name: 'Pictures', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
+    });
+    return r.canceled ? null : r.filePaths[0];
+  });
+  ipcMain.handle('restart', () => { stopEngine(); app.relaunch(); app.exit(0); });
   // Links to licences, song pages and so on open in the normal browser, not inside the app.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) shell.openExternal(url);

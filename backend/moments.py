@@ -35,6 +35,24 @@ WEIGHTS = {
     "film": {"energy": 0.3, "emotion": 0.35, "quotable": 0.1, "pace": 0.15, "length": 0.1},
     "podcast": {"energy": 0.1, "emotion": 0.2, "quotable": 0.4, "pace": 0.2, "length": 0.1},
 }
+DEFAULT_WEIGHTS = {k: dict(v) for k, v in WEIGHTS.items()}
+
+
+def load_learned():
+    """Weights re-fitted from this channel's real views (see performance.py) replace the defaults per type."""
+    import json
+    from . import config
+    for k, v in DEFAULT_WEIGHTS.items():
+        WEIGHTS[k] = dict(v)
+    f = config.DATA / "learned_weights.json"
+    try:
+        for k, v in (json.loads(f.read_text("utf-8")) if f.exists() else {}).items():
+            if k in WEIGHTS and set(v) == set(WEIGHTS[k]):
+                WEIGHTS[k] = v
+    except Exception:
+        pass
+
+
 TARGET_LEN = {"podcast": 45}   # podcast moments need room for the setup; streams default to ~32s
 
 
@@ -159,7 +177,7 @@ def _clip(start, end, zp, segments, kind, hype_ps=0.0, quote_ps=0.0):
     return {
         "start": round(start, 2), "end": round(end, 2), "title": hook[:80], "hook": hook[:60],
         "score": local_score(sub, kind), "breakdown": _shown(sub, kind), "reasons": _reasons(sub, kind),
-        "mood": guess_mood(text, zp), "source": "local", "transcript": text,
+        "mood": guess_mood(text, zp), "source": "local", "transcript": text, "signals": sub,
     }
 
 
@@ -212,3 +230,6 @@ def find_candidates(z, segments, settings, limit, kind="irl"):
         out.append(_clip(start, end, zp, segments, kind, hype_ps, quote_ps))
     out.sort(key=lambda m: -m["score"])
     return out
+
+
+load_learned()

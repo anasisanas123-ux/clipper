@@ -129,7 +129,10 @@ function renderJob(job) {
     root.append(
       h('div', { class: 'job-head' },
         h('div', {}, h('h2', { id: 'j-title' }), h('div', { class: 'hint', id: 'j-sub' })),
-        h('div', { class: 'actions' },
+        h('div', { class: 'actions wrap' },
+          h('button', { onclick: () => batch('render-all', { preview: true }, 'quick preview'), title: 'Fast low-quality previews of every clip' }, 'Preview all'),
+          h('button', { onclick: () => batch('render-all', {}, 'full-quality render'), title: 'Render every clip in full quality with its current settings' }, 'Render all'),
+          h('button', { onclick: exportAll, title: 'Copy every full-quality clip to the exports folder with its description' }, 'Export all'),
           h('button', { onclick: scheduleAll, title: 'Upload every rendered clip to YouTube, one per free daily slot, best score first' }, 'Schedule all to YouTube'),
           h('button', { class: 'danger', onclick: removeJob }, 'Delete'))),
       h('div', { id: 'j-status' }),
@@ -177,6 +180,23 @@ function renderJob(job) {
     }
     card.update(clip);
   }
+}
+
+async function batch(path, body, what) {
+  try {
+    const r = await api(`/api/jobs/${state.jobId}/${path}`, { body });
+    toast(r.queued ? `${r.queued} clip${r.queued === 1 ? '' : 's'} queued for a ${what}` : 'Nothing to do: every clip is already working');
+    poll();
+  } catch (err) { toast(err.message, true); }
+}
+
+async function exportAll() {
+  try {
+    const r = await api(`/api/jobs/${state.jobId}/export-all`, { method: 'POST' });
+    if (!r.count) return toast('No full-quality clips to export yet. Render them first.', true);
+    toast(`Exported ${r.count} clip${r.count === 1 ? '' : 's'}`);
+    api('/api/open-folder', { body: { which: 'exports' } });
+  } catch (err) { toast(err.message, true); }
 }
 
 async function scheduleAll() {
@@ -276,9 +296,44 @@ function buildCard(job, clip) {
   showZoom();
   songOptions(song, clip.song);
 
+  // timeline options
+  const opt = (key, label, tip, dflt) => {
+    const box = h('input', { type: 'checkbox', checked: clip[key] ?? dflt });
+    return { box, el: h('label', { class: 'row small', title: tip }, box, ' ' + label) };
+  };
+  const tighten = opt('tighten', 'Cut pauses', 'Removes silent gaps between sentences (jump cuts). Loud action is never cut.', true);
+  const coldOpen = opt('cold_open', 'Cold open', 'Starts with a 2-second teaser of the payoff, then jumps back to the start of the story.', false);
+  const trackFace = opt('track_face', 'Follow the face', 'The crop pans smoothly to keep the person in frame when they move.', true);
+  const beatSync = opt('beat_sync', 'Effects on the beat', 'With a song chosen, effects snap to its beats.', true);
+  const retime = () => fx.resuggest();
+  tighten.box.addEventListener('change', retime);
+  coldOpen.box.addEventListener('change', retime);
+  beatSync.box.addEventListener('change', retime);
+  song.addEventListener('change', () => { if (beatSync.box.checked) retime(); });
+
+  // AI ideas for the title, hook, meme caption and story text
+  const ideasBox = h('div', { class: 'ideas' });
+  const ideasBtn = h('button', { class: 'link', title: 'Ask the connected AI for other titles, hooks and captions' }, 'More title ideas');
+  ideasBtn.onclick = async () => {
+    ideasBtn.disabled = true; ideasBtn.textContent = 'Thinking…';
+    try {
+      const r = await api(`/api/jobs/${job.id}/clips/${clip.id}/ideas`, { method: 'POST' });
+      const group = (label, items, target) => items.length ? h('div', { class: 'idea-group' }, h('span', { class: 'hint' }, label),
+        ...items.map((t) => h('button', { class: 'chip', title: 'Use this', onclick: () => { target.value = t; target.dispatchEvent(new Event('input')); } }, t))) : null;
+      ideasBox.replaceChildren(group('Titles', r.titles, title), group('Hooks', r.hooks, hook), group('Meme captions', r.contexts, meme),
+        group('Story texts', r.stories, storyText), h('button', { class: 'link', onclick: () => ideasBox.replaceChildren() }, 'Hide ideas'));
+    } catch (err) { toast(err.message, true); }
+    ideasBtn.disabled = false; ideasBtn.textContent = 'More title ideas';
+  };
+
   const draft = { start: clip.start, end: clip.end };
   const range = h('span', { class: 'range' });
-  const showRange = () => { range.textContent = `${fmtTime(draft.start)} → ${fmtTime(draft.end)} (${Math.round(draft.end - draft.start)}s)`; };
+  const showRange = () => {
+    const len = Math.round(draft.end - draft.start);
+    const final = clip.final_len && Math.abs(clip.final_len - len) > 0.5 && draft.start === clip.start && draft.end === clip.end
+      ? `, ${Math.round(clip.final_len)}s after edits` : '';
+    range.textContent = `${fmtTime(draft.start)} → ${fmtTime(draft.end)} (${len}s${final})`;
+  };
   const nudge = (key, d) => () => {
     draft[key] = Math.max(0, draft[key] + d);
     if (draft.end - draft.start < 5) draft[key] -= d;
@@ -286,20 +341,46 @@ function buildCard(job, clip) {
   };
   showRange();
 
-  const renderBtn = h('button', { class: 'primary', onclick: doRender });
+  const renderBtn = h('button', { class: 'primary', onclick: () => doRender(false) });
+  const previewBtn = h('button', { onclick: () => doRender(true), title: 'Low-quality version in a fraction of the time, to check changes' }, 'Quick preview');
   const exportBtn = h('button', { onclick: doExport }, 'Export');
+  const styleBtn = h('button', { class: 'link', onclick: applyStyle, title: 'Framing, captions, effects style, filter, song and timeline options' }, 'Use this style for every clip');
   const copyBox = h('div', { class: 'copy' });
   const layoutNote = h('span', { class: 'hint' });
+  const badge = h('div', { class: 'badge', hidden: true }, 'Quick preview');
+  const shareButtons = [
+    h('button', { onclick: () => share('tiktok'), title: 'Exports the video, shows it in Explorer, copies the caption and opens TikTok upload' }, 'Post to TikTok'),
+    h('button', { onclick: () => share('instagram'), title: 'Exports the video, shows it in Explorer, copies the caption and opens Instagram' }, 'Post to Reels'),
+  ];
 
-  async function doRender() {
+  const settingsBody = () => ({
+    title: title.value, hook: hook.value, context: meme.value.trim(), zoom: +zoom.value, hashtags: parseTags(tags.value), layout: layout.value, caption_style: caps.value,
+    highlight: colour.value, song: song.value, music_volume: +volume.value, progress_bar: bar.checked,
+    start: draft.start, end: draft.end, story: storyText.value.trim(), comment: comment.value.trim(),
+    tighten: tighten.box.checked, cold_open: coldOpen.box.checked, track_face: trackFace.box.checked, beat_sync: beatSync.box.checked,
+    ...fx.value(),
+  });
+  async function doRender(preview) {
     try {
-      await api(`/api/jobs/${job.id}/clips/${clip.id}/render`, { body: {
-        title: title.value, hook: hook.value, context: meme.value.trim(), zoom: +zoom.value, hashtags: parseTags(tags.value), layout: layout.value, caption_style: caps.value,
-        highlight: colour.value, song: song.value, music_volume: +volume.value, progress_bar: bar.checked,
-        start: draft.start, end: draft.end, story: storyText.value.trim(), comment: comment.value.trim(),
-        ...fx.value(),
-      } });
+      await api(`/api/jobs/${job.id}/clips/${clip.id}/render`, { body: { ...settingsBody(), preview } });
       poll();
+    } catch (err) { toast(err.message, true); }
+  }
+  async function applyStyle() {
+    if (!confirm('Give every other clip in this video the same framing, captions, effects style, filter, song and timeline options, and re-render them? Each keeps its own text and gets effects placed on its own loud moments.')) return;
+    try {
+      await api(`/api/jobs/${job.id}/clips/${clip.id}/render`, { body: settingsBody() });
+      const r = await api(`/api/jobs/${job.id}/clips/${clip.id}/apply-style`, { method: 'POST' });
+      toast(`Style applied to ${r.queued} other clip${r.queued === 1 ? '' : 's'}`);
+      poll();
+    } catch (err) { toast(err.message, true); }
+  }
+  async function share(platform) {
+    try {
+      const r = await api(`/api/jobs/${job.id}/clips/${clip.id}/share`, { body: { platform } });
+      try { await navigator.clipboard.writeText(r.caption); } catch {}
+      window.open(r.url, '_blank');
+      toast(`The video is selected in Explorer and the caption is copied. Drag the file into the ${platform === 'tiktok' ? 'TikTok' : 'Instagram'} page and paste the caption.`);
     } catch (err) { toast(err.message, true); }
   }
   async function doExport() {
@@ -310,9 +391,10 @@ function buildCard(job, clip) {
   }
 
   const field = (label, control, extra) => h('label', { class: 'field' }, h('span', {}, label), control, extra);
-  const fx = buildEffects(job, clip, () => ({ start: draft.start, end: draft.end }), video);
+  const fx = buildEffects(job, clip, () => ({ start: draft.start, end: draft.end, tighten: tighten.box.checked,
+    cold_open: coldOpen.box.checked, song: song.value }), video);
   const el = h('article', { class: 'clip' },
-    h('div', { class: 'player' }, video, overlay),
+    h('div', { class: 'player' }, video, overlay, badge),
     h('div', { class: 'info' },
       h('div', { class: 'score-row' },
         h('div', { class: 'score ' + bandClass }, h('b', {}, String(clip.score)), h('small', {}, '/100')),
@@ -324,7 +406,7 @@ function buildCard(job, clip) {
       h('ul', { class: 'reasons' }, (clip.reasons || []).map((r) => h('li', {}, r))),
       copyBox,
       h('div', { class: 'controls' },
-        field('Title', title), field('Hashtags (#shorts is added automatically)', tags),
+        field('Title', title, ideasBtn), ideasBox, field('Hashtags (#shorts is added automatically)', tags),
         memeField, hookField,
         h('div', { class: 'grid2' }, field('Framing', layout, layoutNote), field('Captions', caps)),
         zoomField, storyFields,
@@ -338,17 +420,26 @@ function buildCard(job, clip) {
             range,
             h('button', { onclick: nudge('end', -1), title: 'End 1s earlier' }, '◀ end'),
             h('button', { onclick: nudge('end', 1), title: 'End 1s later' }, 'end ▶'))),
+        h('div', { class: 'opts' }, tighten.el, coldOpen.el, trackFace.el, beatSync.el),
         fx.el),
-      h('div', { class: 'actions' }, renderBtn, exportBtn),
-      h('div', { class: 'yt' }, h('span', { class: 'hint' }, 'YouTube'), h('div', { class: 'yt-row' }, ytButtons), ytStatus)));
+      h('div', { class: 'actions' }, styleBtn, previewBtn, renderBtn, exportBtn),
+      h('div', { class: 'yt' }, h('span', { class: 'hint' }, 'YouTube'), h('div', { class: 'yt-row' }, ytButtons), ytStatus,
+        h('div', { class: 'yt-row' }, h('span', { class: 'hint' }, 'Other apps:'),
+          ...shareButtons))));
 
   let shown = -1;
+  let shownKey = '';
   function update(c) {
     const busy = c.status === 'queued' || c.status === 'rendering';
-    if (c.status === 'ready' && c.version !== shown) {
-      shown = c.version;
-      video.src = `/media/${job.id}/${c.id}.mp4?v=${c.version}`;
+    const isPreview = c.showing === 'preview';
+    const key = isPreview ? 'p' + c.preview_version : 'f' + c.version;
+    if (c.status === 'ready' && (c.version > 0 || c.preview_version > 0) && key !== shownKey) {
+      shownKey = key;
+      shown = Math.max(c.version, c.preview_version || 0);
+      video.src = isPreview ? `/media/${job.id}/${c.id}.mp4?kind=preview&v=${c.preview_version}` : `/media/${job.id}/${c.id}.mp4?v=${c.version}`;
     }
+    badge.hidden = !(isPreview && shown >= 0);
+    clip.final_len = c.final_len; showRange();
     video.hidden = shown < 0;
     fx.sync(c);
     if (busy) overlay.replaceChildren(h('div', { class: 'spinner' }), h('div', {}, c.status === 'queued' ? 'Waiting in line' : (c.step || 'Working')));
@@ -359,12 +450,16 @@ function buildCard(job, clip) {
     overlay.classList.toggle('over-video', busy && shown >= 0);
     renderBtn.disabled = busy;
     renderBtn.textContent = busy ? 'Working…' : shown < 0 ? 'Render this clip' : 'Re-render with changes';
-    exportBtn.disabled = busy || shown < 0;
+    previewBtn.disabled = busy;
+    const fullReady = c.version > 0 && !isPreview;
+    exportBtn.disabled = busy || !fullReady;
+    exportBtn.title = fullReady ? '' : 'Render in full quality first';
+    for (const b of shareButtons) b.disabled = busy || !fullReady;
     layoutNote.textContent = c.used_layout && layout.value === 'auto' ? 'auto picked: ' + ({ split: 'facecam + gameplay', crop: 'centre crop', blur: 'blurred background', bars: 'black bars' })[c.used_layout] : '';
 
     const yt = c.youtube;
     const ytBusy = yt && ['queued', 'uploading', 'scheduled', 'uploaded'].includes(yt.status);
-    for (const b of ytButtons) b.disabled = busy || shown < 0 || ytBusy;
+    for (const b of ytButtons) b.disabled = busy || !fullReady || ytBusy;
     ytStatus.className = 'yt-status hint' + (yt && yt.status === 'error' ? ' bad' : yt && yt.video_id ? ' ok' : '');
     if (!yt) ytStatus.replaceChildren();
     else if (yt.status === 'queued' || yt.status === 'uploading') ytStatus.replaceChildren(yt.status === 'queued' ? 'Waiting to upload…' : 'Uploading to YouTube…');
@@ -468,6 +563,7 @@ function buildEffects(job, clip, getRange, video) {
   note.textContent = 'Pause the preview where you want an effect, then add it. Changes show after "Re-render with changes".';
   return {
     el,
+    resuggest: () => { if (touched || clip.effects != null) suggest(); },
     value: () => ({ effects_preset: preset.value, filter: filter.value, sfx_volume: +vol.value,
       effects: touched || clip.effects != null ? events.map(({ t, fx, sound, emoji }) => ({ t, fx, sound, emoji })) : undefined }),
     sync(c) {
@@ -562,7 +658,7 @@ $('#open-sfx-folder').onclick = () => api('/api/open-folder', { body: { which: '
 // ---------- settings ----------
 const FIELDS = ['clip_count', 'min_len', 'max_len', 'default_layout', 'default_zoom', 'caption_style', 'custom_base_url',
   'highlight', 'max_height', 'progress_bar', 'whisper_model', 'language', 'audd_api_key', 'jamendo_client_id',
-  'schedule_times', 'youtube_privacy', 'effects_preset', 'sfx_volume', 'channel_name', 'channel_handle', 'channel_avatar'];
+  'schedule_times', 'youtube_privacy', 'effects_preset', 'sfx_volume', 'channel_name', 'channel_handle', 'channel_avatar', 'tighten', 'cold_open'];
 
 // Connected AI: one key and model per provider. Typed values are kept per provider while switching,
 // so trying a different provider doesn't wipe what was entered for the first.
@@ -656,6 +752,8 @@ function fillSettings(s) {
     else el.value = s[f] ?? '';
   }
   $('#s-audd_api_key').placeholder = s.has_audd_key ? 'saved – type to replace' : 'optional';
+  $('#gpu-note').textContent = s.gpu_note || '';
+  $('#gpu-note').hidden = !s.gpu_note;
   drafts = {};
   $('#ai-provider').replaceChildren(...Object.entries(s.providers).map(([id, p]) => h('option', { value: id }, p.label)));
   $('#ai-provider').value = s.ai_provider;
@@ -695,6 +793,83 @@ $('#settings-save').onclick = async () => {
     toast(s.scorer === 'ai' && !s.ai_ready ? `Saved, but the connected AI isn't ready: ${s.ai_status}.` : 'Settings saved', s.scorer === 'ai' && !s.ai_ready);
   } catch (err) { toast(err.message, true); }
 };
+
+// ---------- profile picture, updates ----------
+$('#pick-avatar').onclick = async () => {
+  if (!window.clipper || !window.clipper.pickImage) return toast('Type the full path to the picture instead', true);
+  const path = await window.clipper.pickImage();
+  if (path) $('#s-channel_avatar').value = path;
+};
+$('#update-check').onclick = async () => {
+  const st = $('#update-state');
+  st.textContent = 'Checking…';
+  $('#update-apply').hidden = true;
+  try {
+    const r = await api('/api/update');
+    if (!r.can_update) { st.textContent = r.reason; return; }
+    if (!r.behind) { st.textContent = 'Clipper is up to date.'; return; }
+    st.replaceChildren(`${r.behind} update${r.behind === 1 ? '' : 's'} available:`, h('ul', {}, r.changes.map((c) => h('li', {}, c))));
+    $('#update-apply').hidden = false;
+  } catch (err) { st.textContent = err.message; }
+};
+$('#update-apply').onclick = async () => {
+  const st = $('#update-state');
+  $('#update-apply').disabled = true;
+  st.textContent = 'Updating… (installing new packages can take a few minutes)';
+  try {
+    const r = await api('/api/update', { method: 'POST' });
+    st.textContent = r.message;
+    $('#update-apply').hidden = true;
+    $('#restart-app').hidden = !r.updated;
+  } catch (err) { st.textContent = err.message; }
+  $('#update-apply').disabled = false;
+};
+$('#restart-app').onclick = () => {
+  if (window.clipper && window.clipper.restart) window.clipper.restart();
+  else toast('Close Clipper and open it again', true);
+};
+
+// ---------- results (real YouTube numbers) ----------
+function showResults(r) {
+  const kinds = { irl: 'IRL', gaming: 'Gaming', film: 'Film / TV', podcast: 'Podcast' };
+  const sum = [];
+  for (const [k, v] of Object.entries(r.kinds || {})) {
+    if (!v.uploads) continue;
+    let line = `${kinds[k]}: ${v.uploads} uploaded, ${v.settled} settled.`;
+    if (v.score_vs_views != null) {
+      const c = v.score_vs_views;
+      line += ` Score vs views: ${c >= 0.5 ? 'strong match' : c >= 0.2 ? 'some match' : c > -0.2 ? 'no clear link yet' : 'opposite'} (${c.toFixed(2)}).`;
+    }
+    if (v.learned) line += ' Built-in weights tuned to your channel: ' + Object.entries(v.learned).map(([a, b]) => `${a} ${Math.round(b * 100)}%`).join(', ') + '.';
+    else if (v.settled < 8) line += ` ${8 - v.settled} more settled uploads before it starts learning.`;
+    sum.push(h('p', {}, line));
+  }
+  $('#results-summary').replaceChildren(...(sum.length ? sum : [h('p', { class: 'hint' }, r.fetched ? 'No uploads from Clipper yet.' : 'Press "Get the latest numbers".')]),
+    r.fetched ? h('p', { class: 'hint' }, 'Updated ' + localTime(r.fetched)) : '');
+  const rows = [...(r.rows || [])].sort((a, b) => (b.views || 0) - (a.views || 0));
+  $('#results-list').replaceChildren(...rows.map((x) => h('div', { class: 'track' },
+    h('div', { class: 'rank', title: 'Predicted viral chance' }, String(x.score ?? '–')),
+    h('div', { class: 'grow' }, h('div', {}, x.title),
+      h('div', { class: 'hint' }, x.missing ? 'Not found on YouTube (deleted or still processing)'
+        : `${(x.views || 0).toLocaleString()} views · ${x.likes || 0} likes · ${x.comments || 0} comments · ${x.views_per_day}/day · ${x.privacy}`)),
+    h('a', { href: 'https://youtube.com/shorts/' + x.video_id, target: '_blank' }, 'Open'))));
+}
+$('#open-results').onclick = async () => {
+  showResults(await api('/api/performance'));
+  $('#results').showModal();
+};
+$('#results-refresh').onclick = async () => {
+  const b = $('#results-refresh');
+  b.disabled = true; b.textContent = 'Fetching…';
+  try { showResults(await api('/api/performance/refresh', { method: 'POST' })); } catch (err) { toast(err.message, true); }
+  b.disabled = false; b.textContent = 'Get the latest numbers';
+};
+$('#results-reset').onclick = async () => {
+  if (!confirm('Go back to the default built-in weights? Your numbers are kept, and it will learn again next time you fetch them.')) return;
+  await api('/api/performance/reset', { method: 'POST' });
+  toast('Back to the default weights');
+};
+$('#results-close').onclick = () => $('#results').close();
 
 // ---------- boot ----------
 (async () => {

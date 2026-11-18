@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import ai, audio, config, copyright, effects, layout, moments, music, providers, render, sources, transcribe, youtube
+from . import ai, audio, config, copyright, effects, timeline, layout, moments, music, providers, render, sources, transcribe, youtube
 
 log = logging.getLogger("clipper")
 KINDS = ("irl", "gaming", "film", "podcast")
@@ -86,13 +86,14 @@ def delete(job_id):
         shutil.rmtree(_dir(job_id), ignore_errors=True)
 
 
-def queue_render(job_id, clip_id, patch=None):
+def queue_render(job_id, clip_id, patch=None, preview=False):
     job = _jobs[job_id]
     clip = next(c for c in job["clips"] if c["id"] == clip_id)
     with _lock:
         old_start = clip["start"]
         for k in ("layout", "zoom", "caption_style", "highlight", "hook", "context", "title", "hashtags", "song", "music_volume",
-                  "progress_bar", "start", "end", "effects_preset", "filter", "effects", "sfx_volume", "story", "comment"):
+                  "progress_bar", "start", "end", "effects_preset", "filter", "effects", "sfx_volume", "story", "comment",
+                  "tighten", "cold_open", "track_face", "beat_sync"):
             if patch and k in patch and patch[k] is not None:
                 clip[k] = patch[k]
         if clip.get("effects") and clip["start"] != old_start:
@@ -106,7 +107,7 @@ def queue_render(job_id, clip_id, patch=None):
             clip["end"] = min(clip["end"], job["duration"])
         clip["status"], clip["error"] = "queued", None
     _save(job)
-    _tasks.put(("render", job_id, clip_id))
+    _tasks.put(("preview" if preview else "render", job_id, clip_id))
     return clip
 
 
@@ -200,7 +201,9 @@ def _analyze(job):
                  progress_bar=settings["progress_bar"], song="", music_volume=settings["music_volume"],
                  copyright=None, src_start=None, src_end=None, youtube=None,
                  effects_preset=settings.get("effects_preset") or "edit", filter=None, effects=None,
-                 sfx_volume=settings.get("sfx_volume", 0.7))
+                 sfx_volume=settings.get("sfx_volume", 0.7), tighten=settings.get("tighten", True),
+                 cold_open=settings.get("cold_open", False), track_face=True, beat_sync=True,
+                 showing=None, preview_version=0)
         if not m.get("hashtags"):
             m["hashtags"] = moments.make_hashtags(job, m)
         if not m.get("context"):
@@ -268,7 +271,7 @@ def _source(job, settings):
     return src
 
 
-def _render(job, clip):
+def _render(job, clip, preview=False):
     settings = config.load_settings()
     d = _dir(job["id"])
     cid = clip["id"]
@@ -294,6 +297,7 @@ def _render(job, clip):
             sources.download_segment(_source(job, settings), s0, s1, src)
         clip["src_start"], clip["src_end"] = s0, s1
         words_file.unlink(missing_ok=True)
+        (d / f"{cid}_env.npy").unlink(missing_ok=True)
         clip["layout_info"] = None
 
     if not clip.get("layout_info"):
@@ -304,28 +308,60 @@ def _render(job, clip):
         # A small face in a podcast is a wide studio shot, not a webcam over gameplay: crop on the speaker.
         chosen = "crop"
 
-    if not words_file.exists():
+    env_file = d / f"{cid}_env.npy"
+    if not words_file.exists() or not env_file.exists():
         step("Timing the captions")
         wav = d / f"{cid}_src.wav"
         sources.extract_wav(src, wav)
-        words_file.write_text(json.dumps(transcribe.transcribe_words(wav, settings, lambda t, p: step(t))), "utf-8")
+        np.save(env_file, timeline.envelope(wav))
+        if not words_file.exists():
+            words_file.write_text(json.dumps(transcribe.transcribe_words(wav, settings, lambda t, p: step(t))), "utf-8")
         wav.unlink(missing_ok=True)
     words = json.loads(words_file.read_text("utf-8"))
 
     trim_start = clip["start"] - clip["src_start"]
     trim_end = clip["end"] - clip["src_start"]
+    ctx = _clip_context(job, clip)
+    song_path, song_entry = music.resolve(clip.get("song") or "")
     if clip.get("effects") is None:
         fx = suggest_effects(job, clip, clip.get("effects_preset") or settings.get("effects_preset"), words)
         if clip.get("filter"):
             fx.pop("filter")            # the user already picked one
         clip.update(fx)
-    clip["effects"] = effects.clean(clip["effects"], trim_end - trim_start)
+    plan = ctx["plan"]
+    final_len = plan["length"] if plan else trim_end - trim_start
+    clip["effects"] = effects.clean(clip["effects"], final_len)
 
-    step("Rendering")
-    song_path, song_entry = music.resolve(clip.get("song") or "")
-    spec = dict(clip, src=src.name, trim_start=trim_start, trim_end=trim_end, layout=chosen)
+    fps = effects.video_fps(src)
+    if plan and not timeline.is_trivial(plan, trim_end - trim_start):
+        step("Cutting out the pauses" if not plan["teaser"] else "Building the cold open")
+        edit = d / f"{cid}_edit.mkv"
+        timeline.render_plan(src, trim_start, plan, edit, d, fps)
+        r_src, r_start, r_end = edit, 0.0, plan["length"]
+        r_words = timeline.remap_words(plan, ctx["words"])
+    else:
+        r_src, r_start, r_end, r_words = src, trim_start, trim_end, words
+    lay = dict(clip["layout_info"])
+    if (clip.get("track_face", True) and chosen in ("crop", "bars", "blur", "story")
+            and lay.get("face_x") and lay.get("layout") != "split"):
+        step("Following the face")
+        try:
+            lay["track"] = layout.track(r_src, r_start, r_end - r_start)
+        except Exception:
+            log.exception("[%s] face tracking failed", job["id"])
+
+    step("Rendering a quick preview" if preview else "Rendering")
+    spec = dict(clip, src=r_src.name, trim_start=r_start, trim_end=r_end, layout=chosen, layout_info=lay)
     tmp = d / f"{cid}.tmp.mp4"
-    render.render(d, spec, words, tmp, song_path)
+    render.render(d, spec, r_words, tmp, song_path, preview=preview)
+    clip["final_len"] = round(r_end - r_start, 2)
+    clip["cuts"] = plan["cuts"] if plan else 0
+    if preview:
+        tmp.replace(d / f"{cid}_preview.mp4")
+        clip.update(status="ready", step="", used_layout=chosen, showing="preview",
+                    preview_version=clip.get("preview_version", 0) + 1)
+        _save(job)
+        return
     tmp.replace(d / f"{cid}.mp4")
 
     step("Checking copyright risk")
@@ -336,8 +372,40 @@ def _render(job, clip):
                                              job.get("kind", "irl"), job.get("topic", ""))
     finally:
         cut.unlink(missing_ok=True)
-    clip.update(status="ready", step="", used_layout=chosen, version=clip.get("version", 0) + 1)
+    clip.update(status="ready", step="", used_layout=chosen, showing="full", version=clip.get("version", 0) + 1)
     _save(job)
+
+
+def _clip_context(job, clip, start=None, end=None, tighten=None, cold_open=None, song=None):
+    """Everything about a clip's timing that rendering and effect suggestions share: its words in clip time,
+    the fine loudness envelope, the timeline edit (dead air / cold open) and the song's beats.
+    Pieces that need a first render (words, envelope) are None until then."""
+    d = _dir(job["id"])
+    cid = clip["id"]
+    start = clip["start"] if start is None else float(start)
+    end = clip["end"] if end is None else float(end)
+    dur = end - start
+    out = {"words": None, "env": None, "plan": None, "beats": None, "offset": None}
+    wf, ef = d / f"{cid}_words.json", d / f"{cid}_env.npy"
+    if wf.exists() and ef.exists() and clip.get("src_start") is not None and clip["src_start"] <= start:
+        off = start - clip["src_start"]
+        src_words = json.loads(wf.read_text("utf-8"))
+        env = np.load(ef)
+        out["offset"] = off
+        out["src_words"] = src_words
+        out["words"] = [{**w, "start": w["start"] - off, "end": w["end"] - off} for w in src_words
+                        if w["end"] > off and w["start"] < off + dur]
+        out["env"] = env[int(off * timeline.ENV_RATE): int((off + dur) * timeline.ENV_RATE)]
+        out["plan"] = timeline.plan(out["words"], out["env"], dur,
+                                    clip.get("tighten", True) if tighten is None else bool(tighten),
+                                    clip.get("cold_open", False) if cold_open is None else bool(cold_open))
+    song_path, _ = music.resolve((clip.get("song") or "") if song is None else song)
+    if song_path and clip.get("beat_sync", True):
+        try:
+            out["beats"] = timeline.song_beats(Path(song_path))
+        except Exception:
+            log.exception("beat detection failed")
+    return out
 
 
 def _excitement(job):
@@ -345,20 +413,18 @@ def _excitement(job):
     return np.load(f) if f.exists() else None
 
 
-def suggest_effects(job, clip, preset, words=None, start=None, end=None) -> dict:
-    """Automatic effects for a clip (optionally for a draft start/end the user hasn't rendered yet)."""
+def suggest_effects(job, clip, preset, words=None, start=None, end=None, tighten=None, cold_open=None, song=None) -> dict:
+    """Automatic effects for a clip (optionally for a draft start/end/options the user hasn't rendered yet),
+    timed on the finished Short."""
     c = dict(clip, start=clip["start"] if start is None else float(start), end=clip["end"] if end is None else float(end))
-    if words is None:
-        f = _dir(job["id"]) / f"{clip['id']}_words.json"
-        words = json.loads(f.read_text("utf-8")) if f.exists() else []
-    if words and clip.get("src_start") is not None:
-        offset = c["start"] - clip["src_start"]
-    else:
-        # no word timings yet: use the transcript's sentence timings, which are on the video's timeline
-        words = [{"start": s["start"], "text": s["text"]} for s in moments_segments(job)
-                 if c["start"] <= s["start"] < c["end"]]
-        offset = c["start"]
-    return effects.suggest(preset, c, _excitement(job), words, offset)
+    ctx = _clip_context(job, clip, start, end, tighten, cold_open, song)
+    if ctx["words"] is not None:
+        return effects.suggest(preset, c, _excitement(job), ctx["src_words"], ctx["offset"],
+                               env=ctx["env"], plan=ctx["plan"], beats=ctx["beats"])
+    # no word timings yet: use the transcript's sentence timings, which are on the video's timeline
+    words = [{"start": seg["start"], "text": seg["text"]} for seg in moments_segments(job)
+             if c["start"] <= seg["start"] < c["end"]]
+    return effects.suggest(preset, c, _excitement(job), words, c["start"], beats=ctx["beats"])
 
 
 def moments_segments(job):
@@ -376,6 +442,8 @@ def export(job_id, clip_id) -> str:
     src = _dir(job_id) / f"{clip_id}.mp4"
     if not src.exists():
         raise FileNotFoundError("Render the clip first")
+    if clip.get("showing") == "preview":
+        raise FileNotFoundError("Your latest changes are only in the quick preview. Render it in full quality first.")
     safe = lambda s: re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", s or "").strip()[:80] or "clip"
     folder = config.EXPORTS / safe(job["streamer"])
     folder.mkdir(parents=True, exist_ok=True)
@@ -383,6 +451,48 @@ def export(job_id, clip_id) -> str:
     shutil.copyfile(src, out)
     out.with_suffix(".txt").write_text(f"{clip['title']}\n\n{description(job, clip)}", "utf-8")
     return str(out)
+
+
+STYLE_KEYS = ("layout", "zoom", "caption_style", "highlight", "progress_bar", "song", "music_volume",
+              "effects_preset", "filter", "sfx_volume", "tighten", "cold_open", "track_face", "beat_sync")
+
+
+def apply_style(job_id, clip_id) -> int:
+    """Copies one clip's look (framing, captions, effects style, filter, song, timeline options) to every other
+    clip in the video and re-renders them. Each clip gets its own effects placed on its own loud moments."""
+    job = _jobs[job_id]
+    model = next(c for c in job["clips"] if c["id"] == clip_id)
+    count = 0
+    for c in job["clips"]:
+        if c["id"] == clip_id or c["status"] in ("queued", "rendering"):
+            continue
+        with _lock:
+            for k in STYLE_KEYS:
+                if k in model:
+                    c[k] = model[k]
+            c["effects"] = None
+        queue_render(job_id, c["id"])
+        count += 1
+    return count
+
+
+def render_all(job_id, preview=False) -> int:
+    job = _jobs[job_id]
+    count = 0
+    for c in job["clips"]:
+        if c["status"] not in ("queued", "rendering"):
+            queue_render(job_id, c["id"], preview=preview)
+            count += 1
+    return count
+
+
+def export_all(job_id) -> list:
+    job = _jobs[job_id]
+    out = []
+    for c in job["clips"]:
+        if c["status"] == "ready" and c.get("showing") != "preview" and (_dir(job_id) / f"{c['id']}.mp4").exists():
+            out.append(export(job_id, c["id"]))
+    return out
 
 
 def hashtag_line(clip) -> str:
@@ -476,7 +586,7 @@ def _worker():
             else:
                 clip = next(c for c in job["clips"] if c["id"] == clip_id)
                 try:
-                    _render(job, clip)
+                    _render(job, clip, preview=(kind == "preview"))
                 except Exception as e:
                     log.exception("Task failed")
                     clip["status"], clip["error"] = "error", str(e)[-600:]

@@ -169,3 +169,41 @@ def pick_moments(segments, z, meta, settings, limit, local_candidates, whole=Fal
             break
     out.sort(key=lambda m: -m["score"])
     return out, info
+
+
+IDEAS_SYSTEM = """You write the packaging for one YouTube Short cut from a longer video: upload titles, opening \
+hook text, a meme-style caption and story-card text. You get the clip's transcript (from speech recognition, so \
+expect misheard words) and what kind of video it came from.
+
+Titles: under 70 characters, specific to what happens, no hashtags, each using a different angle (curiosity, \
+the quote itself, the outcome, the stakes, a question). Hooks: at most seven words of on-screen text for the \
+first three seconds that make a stranger stay without giving away the payoff. Contexts: one line of meme-page \
+narration, at most twelve words, third person ("him when...", "bro realised..."), no asterisks or emojis. \
+Stories: 30 to 55 words explaining what is going on and why it's interesting, with four to six key phrases in \
+[square brackets]. Do not invent events the transcript does not support."""
+
+IDEAS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "titles": {"type": "array", "items": {"type": "string"}},
+        "hooks": {"type": "array", "items": {"type": "string"}},
+        "contexts": {"type": "array", "items": {"type": "string"}},
+        "stories": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["titles", "hooks", "contexts", "stories"],
+    "additionalProperties": False,
+}
+
+
+def ideas(job: dict, clip: dict, settings: dict) -> dict:
+    """Alternative titles, hooks, meme captions and story texts for one clip."""
+    by = f" by {job['streamer']}" if job.get("streamer") else ""
+    user = (f"Video: \"{job.get('title')}\"{by}.\n{KIND_NOTES.get(job.get('kind'), KIND_NOTES['irl'])}"
+            f"{' Topic: ' + job['topic'] + '.' if job.get('topic') else ''}\n"
+            f"Current title: {clip.get('title', '')}\n\n<clip_transcript>\n{clip.get('transcript', '')}\n</clip_transcript>\n\n"
+            "Give 5 titles, 5 hooks, 3 contexts and 2 stories.")
+    data, info = providers.ask_json(settings, IDEAS_SYSTEM, user, IDEAS_SCHEMA)
+    clean = lambda key, limit, n: [_text(x, limit) for x in (data.get(key) or []) if isinstance(x, str) and x.strip()][:n]
+    return {"titles": clean("titles", 100, 6), "hooks": clean("hooks", 60, 6),
+            "contexts": [c.strip("*\"' ") for c in clean("contexts", 90, 4)], "stories": clean("stories", 400, 3),
+            "by": info["provider"]}

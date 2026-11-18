@@ -148,3 +148,17 @@ body.dropping::after { content: "Drop the video to add it"; position: fixed; ins
 .fx-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .controls-sub { display: flex; flex-direction: column; gap: 8px; }
 .controls-sub textarea { font: 14px "Segoe UI", system-ui, sans-serif; margin: 0; }
+
+.opts { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.row.small { font-size: 13px !important; padding: 2px 0; }
+.ideas:empty { display: none; }
+.ideas { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 10px; }
+.idea-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.idea-group .hint { width: 100%; }
+.chip { white-space: normal; text-align: left; padding: 5px 10px; font-size: 13px; border-radius: 14px; }
+.chip:hover { border-color: var(--accent); }
+.badge { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,.75); color: var(--warn); border: 1px solid var(--warn); border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 650; }
+.actions.wrap { flex-wrap: wrap; }
+.actions .link { margin-right: auto; }
+#results-summary p { margin: 4px 0; }
+.field > .link { align-self: flex-start; font-size: 12px; }

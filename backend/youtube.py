@@ -123,3 +123,19 @@ def upload(path, title, description, tags, kind, privacy, publish_at=None) -> st
     while response is None:
         _, response = request.next_chunk(num_retries=4)
     return response["id"]
+
+
+def stats(video_ids: list) -> dict:
+    """Public numbers for uploaded videos: {id: {views, likes, comments, published, privacy, title}}."""
+    out = {}
+    svc = _service()
+    for i in range(0, len(video_ids), 50):
+        resp = svc.videos().list(part="statistics,snippet,status", id=",".join(video_ids[i:i + 50])).execute()
+        for it in resp.get("items", []):
+            st = it.get("statistics", {})
+            out[it["id"]] = {"views": int(st.get("viewCount", 0)), "likes": int(st.get("likeCount", 0)),
+                             "comments": int(st.get("commentCount", 0)),
+                             "published": it["snippet"].get("publishedAt"),
+                             "privacy": it.get("status", {}).get("privacyStatus"),
+                             "title": it["snippet"].get("title")}
+    return out

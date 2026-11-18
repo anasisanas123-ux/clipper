@@ -241,19 +241,35 @@ def _snap_to_word(t, words, start):
     return best if best is not None else t
 
 
-def suggest(preset: str, clip: dict, z, words: list, offset: float) -> dict:
-    """Effects for one clip. `words` are timed against the clip's source file; `offset` is where the cut starts
-    inside that file (so a word at offset is t=0)."""
+def suggest(preset: str, clip: dict, z, words: list, offset: float, env=None, plan=None, beats=None) -> dict:
+    """Effects for one clip, timed on the finished Short. `words` are timed against the clip's source file;
+    `offset` is where the cut starts inside that file (so a word at offset is t=0). Optional: `env` is the 10 ms
+    loudness envelope in clip time (lands hits exactly), `plan` the timeline edit (dead-air cuts / cold open),
+    `beats` the chosen song's beat times (effects snap to the beat)."""
+    from . import timeline
     preset = preset if preset in PRESETS else "edit"
-    dur = float(clip["end"] - clip["start"])
+    orig_dur = float(clip["end"] - clip["start"])
+    dur = float(plan["length"]) if plan else orig_dur
+    to_final = (lambda t: timeline.to_final(plan, t)) if plan else (lambda t: t)
     result = {"effects_preset": preset, "filter": PRESET_FILTER[preset], "effects": []}
     if preset == "none" or dur <= 2:
         return result
-    rel_words = [{"start": w["start"] - offset, "text": w["text"]} for w in words
-                 if 0 <= w["start"] - offset < dur]
-    peaks = _peaks(z if z is not None else [], clip["start"], clip["end"],
-                   spacing={"subtle": 6, "cinematic": 6}.get(preset, 3.5))
-    peaks = [(round(_snap_to_word(t, rel_words, 0.0), 2), v) for t, v in peaks]   # land on the word's onset
+    rel_words = []
+    for w in words:
+        t = to_final(w["start"] - offset) if 0 <= w["start"] - offset < orig_dur else None
+        if t is not None:
+            rel_words.append({"start": t, "text": w["text"]})
+    peaks = []
+    for t, v in _peaks(z if z is not None else [], clip["start"], clip["end"],
+                       spacing={"subtle": 6, "cinematic": 6}.get(preset, 3.5)):
+        t = timeline.onset_near(env, t) if env is not None and len(env) else t   # the exact hit, to 10 ms
+        ft = to_final(t)
+        if ft is not None:
+            peaks.append((ft, v))
+    if env is None or not len(env):
+        peaks = [(round(_snap_to_word(t, rel_words, 0.0), 2), v) for t, v in peaks]   # land on the word's onset
+    teaser = (plan["segments"][0][1] - plan["segments"][0][0]) if plan and plan.get("teaser") else 0.0
+    peaks = [p for p in peaks if p[0] > teaser + 0.3 or not teaser]
     ev = []
     add = lambda t, fx, sound="", emoji="": ev.append(
         {"t": round(max(0.0, min(dur - 0.1, t)), 2), "fx": fx, "sound": sound, "emoji": emoji})
@@ -291,6 +307,13 @@ def suggest(preset: str, clip: dict, z, words: list, offset: float) -> dict:
             add(t, "flash", "builtin/riser")
             add(t + 0.02, "punch", "builtin/bassdrop")
         add(0, "none", "builtin/whoosh")
+    if teaser:
+        # cold open: the teaser plays, then a whoosh and whip blur jump back to the start of the story
+        add(teaser - 0.12, "blur", "builtin/whoosh")
+    if beats:
+        for e in ev:
+            if e["t"] > 0.3 and e["fx"] != "blur":
+                e["t"] = round(timeline.snap_to_beat(e["t"], beats), 2)
     ev.sort(key=lambda e: e["t"])
     result["effects"] = ev
     return result

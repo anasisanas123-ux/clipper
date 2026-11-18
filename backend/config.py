@@ -37,6 +37,8 @@ DEFAULTS = {
     "progress_bar": True,
     "effects_preset": "edit",        # automatic effects style for new clips: none, subtle, edit, hype, cinematic
     "sfx_volume": 0.7,
+    "tighten": True,                 # cut silent pauses out of new clips (jump cuts)
+    "cold_open": False,              # start new clips with a 2-second teaser of the payoff
     "channel_name": "",              # shown at the top of "story card" Shorts
     "channel_handle": "",
     "channel_avatar": "",            # optional picture file for the story card header
@@ -105,6 +107,7 @@ def ai_model(settings: dict, provider: str) -> str:
 
 _ffmpeg = None
 _nvenc = None
+gpu_note = ""   # set when an NVIDIA GPU is present but can't encode
 
 
 def ffmpeg() -> str:
@@ -143,8 +146,16 @@ def video_encoder() -> list:
             run_ffmpeg(["-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2", "-c:v", "h264_nvenc",
                         "-f", "null", "-"], timeout=30)
             _nvenc = True
-        except Exception:
+        except Exception as e:
             _nvenc = False
+            global gpu_note
+            text = str(e)
+            import re as _re
+            m = _re.search(r"minimum required Nvidia driver for nvenc is ([\d.]+)", text)
+            if m:
+                gpu_note = (f"Your NVIDIA graphics driver is too old for fast GPU video encoding (it needs version "
+                            f"{m.group(1)} or newer), so videos are encoded on the CPU, which is several times "
+                            f"slower. Update the driver with the NVIDIA app or from nvidia.com, then restart Clipper.")
     return ["h264_nvenc", "-preset", "p5", "-rc", "vbr", "-b:v", "0"] if _nvenc else ["libx264", "-preset", "veryfast"]
 
 
