@@ -48,6 +48,16 @@ if ($LASTEXITCODE -ne 0) { throw 'Installing the Python packages failed (see abo
 Say 'Installing the app window (Electron)'
 npm install --no-audit --no-fund
 if ($LASTEXITCODE -ne 0) { throw 'npm install failed (see above).' }
+# npm sometimes skips or silently fails Electron's own download step; make sure the app window is really there.
+$electron = 'node_modules\electron\dist\electron.exe'
+for ($try = 1; ($try -le 3) -and -not (Test-Path $electron); $try++) {
+    Say "Downloading the app window (try $try of 3)"
+    node node_modules\electron\install.js
+}
+if (-not (Test-Path $electron)) {
+    throw "The app window (Electron) couldn't be downloaded. Check the internet connection (or pause any VPN/antivirus web filter) and run this again."
+}
+if (-not (Test-Path '.venv\Scripts\python.exe')) { throw 'The Python environment is missing (see the errors above).' }
 
 Say 'Adding a desktop shortcut'
 $shell = New-Object -ComObject WScript.Shell
