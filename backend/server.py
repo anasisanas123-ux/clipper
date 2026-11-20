@@ -97,8 +97,12 @@ def create_job(body: dict = Body(...)):
 
 @app.get("/api/templates")
 def list_templates():
-    return {"templates": templates.all_templates(), "default": config.load_settings().get("default_template", ""),
-            "keys": list(templates.KEYS), "sound_roles": list(effects.SOUND_ROLES), "auto_songs": music.AUTO_SONG}
+    s = config.load_settings()
+    # "base": the look from Settings plus the clip count and lengths, to fill in a new template
+    base = templates.base_style(s) | {k: s[k] for k in templates.FIND_KEYS}
+    return {"templates": templates.all_templates(), "default": s.get("default_template", ""),
+            "keys": list(templates.KEYS), "find_keys": list(templates.FIND_KEYS), "base": base,
+            "sound_roles": list(effects.SOUND_ROLES), "auto_songs": music.AUTO_SONG}
 
 
 @app.post("/api/templates")

@@ -247,7 +247,7 @@ def _find(s, final=False):
     job, lv, d = s.job, s.job["live"], _d(s.job)
     if not lv["pieces"]:
         return
-    settings = config.load_settings()
+    settings = jobs.templates.find_settings(config.load_settings(), job.get("template", ""))
     end = lv["recorded"]
     w0 = max(0.0, end - CHUNK - LOOKBACK)
     z_all = np.load(d / "excitement.npy")

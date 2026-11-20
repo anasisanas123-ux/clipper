@@ -45,9 +45,25 @@ def _save(job):
         f = _dir(job["id"]) / "job.json"
         if not f.parent.exists():
             return
+        # Windows refuses to replace a file another program has open for a moment (antivirus, search indexing,
+        # backup tools): retry briefly, then write it in place. Saving progress must never fail a render.
         tmp = f.with_suffix(".json.tmp")
-        tmp.write_text(text, "utf-8")
-        tmp.replace(f)
+        for attempt in range(6):
+            try:
+                tmp.write_text(text, "utf-8")
+                tmp.replace(f)
+                return
+            except OSError:
+                time.sleep(0.05 * (attempt + 1))
+        try:
+            f.write_text(text, "utf-8")
+        except OSError as e:
+            log.warning("[%s] couldn't save progress (%s); will try again on the next update", job["id"], e)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def load_all():
@@ -118,9 +134,7 @@ def queue_render(job_id, clip_id, patch=None, preview=False):
     clip = next(c for c in job["clips"] if c["id"] == clip_id)
     with _lock:
         old_start = clip["start"]
-        for k in ("layout", "zoom", "caption_style", "highlight", "hook", "context", "title", "hashtags", "song", "music_volume",
-                  "progress_bar", "start", "end", "effects_preset", "filter", "effects", "sfx_volume", "story", "comment",
-                  "tighten", "cold_open", "track_face", "beat_sync", "cam_pos", "split_game", "sfx_source", "sfx_fixed"):
+        for k in (*templates.KEYS, "hook", "context", "title", "hashtags", "start", "end", "effects", "story", "comment"):
             if patch and k in patch and patch[k] is not None:
                 clip[k] = patch[k]
         if clip.get("effects") and clip["start"] != old_start:
@@ -163,7 +177,8 @@ def _status(job):
 
 
 def _analyze(job):
-    settings = config.load_settings()
+    # the video's template can set how many clips to find and how long they are
+    settings = templates.find_settings(config.load_settings(), job.get("template", ""))
     d = _dir(job["id"])
     status = _status(job)
     _stage(job, "Reading video info")
@@ -277,8 +292,10 @@ def _wait_for_hd(job, step):
 
 
 def _source(job, settings):
-    if sources.needs_full_download(job.get("platform", "")):
-        return {"url": str(_dir(job["id"]) / "source.mp4"), "audio_url": None, "headers": {}}
+    full = _dir(job["id"]) / "source.mp4"
+    if full.exists() and (job.get("hd") or {}).get("status") == "done":
+        # downloaded whole by an older version: cutting from the file on disk is fastest
+        return {"url": str(full), "audio_url": None, "headers": {}}
     cached = _sources.get(job["id"])
     if cached and time.time() - cached[0] < 900:
         return cached[1]
@@ -315,9 +332,17 @@ def _render(job, clip, preview=False):
         s1 = min(job["duration"] or clip["end"] + PAD, clip["end"] + PAD)
         try:
             sources.download_segment(_source(job, settings), s0, s1, src)
-        except Exception:
+        except Exception as first:
             _sources.pop(job["id"], None)        # the link may have expired; fetch a new one once
-            sources.download_segment(_source(job, settings), s0, s1, src)
+            try:
+                sources.download_segment(_source(job, settings), s0, s1, src)
+            except Exception:
+                if job.get("local"):
+                    raise
+                # the site refused the direct cut (YouTube sometimes answers 403): fetch just this part
+                log.warning("[%s] direct cut failed (%s); downloading just this part", job["id"], str(first)[-200:])
+                step("Downloading this part of the video")
+                sources.download_section(job["url"], s0, s1, src, int(settings["max_height"]))
         clip["src_start"], clip["src_end"] = s0, s1
         words_file.unlink(missing_ok=True)
         (d / f"{cid}_env.npy").unlink(missing_ok=True)

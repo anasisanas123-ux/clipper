@@ -131,6 +131,9 @@ def ffmpeg() -> str:
         import imageio_ffmpeg
         shutil.copyfile(imageio_ffmpeg.get_ffmpeg_exe(), local)
     _ffmpeg = str(local)
+    # yt-dlp's check for section downloads only looks on PATH, not at the ffmpeg_location it is given
+    if str(BIN) not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = str(BIN) + os.pathsep + os.environ.get("PATH", "")
     return _ffmpeg
 
 

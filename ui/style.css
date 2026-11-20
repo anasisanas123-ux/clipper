@@ -173,3 +173,14 @@ body.dropping::after { content: "Drop the video to add it"; position: fixed; ins
 .actions .link.tpl { margin-right: 0; }
 .fx-fixed { margin: 6px 0; }
 .fx-fixed summary { cursor: pointer; }
+.tpl-layout { display: grid; grid-template-columns: 240px 1fr; gap: 16px; align-items: start; }
+.tpl-side { display: flex; flex-direction: column; gap: 8px; }
+.tpl-side .list { max-height: 60vh; overflow-y: auto; }
+.tpl-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left; margin-bottom: 6px; }
+.tpl-item.active { outline: 2px solid currentColor; }
+.tpl-form { max-height: 65vh; overflow-y: auto; padding-right: 6px; }
+.tpl-form fieldset { margin-bottom: 10px; }
+@media (max-width: 760px) { .tpl-layout { grid-template-columns: 1fr; } }
+#templates .modal.wide { width: 1000px; }
+.tpl-side .list { overflow-x: hidden; }
+.tpl-item, .tpl-item span { white-space: normal; overflow-wrap: anywhere; }

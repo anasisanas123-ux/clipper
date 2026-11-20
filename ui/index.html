@@ -22,6 +22,7 @@
     <select id="template" title="Template: the look every clip from this video is made with"></select>
     <button class="primary" type="submit">Find clips</button>
   </form>
+  <button id="open-templates" title="Make and edit templates: the look every new video is made with">Templates</button>
   <button id="open-music">Music</button>
   <button id="open-results" title="How your uploaded Shorts actually did">Results</button>
   <button id="open-settings">Settings</button>
@@ -111,11 +112,11 @@
     </fieldset>
     <fieldset>
       <legend>Templates (your own look for every video)</legend>
-      <p class="hint">Set up one clip the way you like it (framing, facecam corner, captions, effects, sounds, song, filter), press <b>Save as template</b> under it, and every new video is made with that template. Anything a template doesn't cover comes from the settings above.</p>
+      <p class="hint">A template sets everything about how clips are made: framing (including facecam on top with gameplay below), captions, effects, sounds, song, filter, timeline options and how many clips to find. It is applied to every clip of a new video before anything is rendered.</p>
       <div class="grid3">
         <label>Template for new videos <select id="s-default_template"></select></label>
       </div>
-      <div id="template-list" class="list"></div>
+      <div class="actions left"><button type="button" id="settings-templates">Make or edit templates…</button></div>
     </fieldset>
     <fieldset>
       <legend>Story card header (for the "Story card" framing)</legend>
@@ -199,6 +200,21 @@
       <button type="button" class="primary" id="settings-save">Save</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="templates">
+  <div class="modal wide">
+    <h2>Templates</h2>
+    <p class="hint">Every clip of a new video is set up with the chosen template before it is rendered. Pick the template next to "Find clips", or mark one as the default for every new video. To change a video you already made, use "Apply a template…" on that video.</p>
+    <div class="tpl-layout">
+      <div class="tpl-side">
+        <div id="tpl-list" class="list"></div>
+        <button type="button" class="primary" id="tpl-new">+ New template</button>
+      </div>
+      <form id="tpl-form" class="tpl-form" onsubmit="return false"></form>
+    </div>
+    <div class="actions"><button type="button" id="tpl-close">Close</button></div>
+  </div>
 </dialog>
 
 <dialog id="results">

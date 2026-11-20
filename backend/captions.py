@@ -85,7 +85,7 @@ def _wrap(text: str, width: int = 20) -> list:
     return lines
 
 
-def _meme(text: str, duration: float, highlight: str, layout: str, picture=None) -> str:
+def _meme(text: str, duration: float, highlight: str, layout: str, picture=None, position="auto") -> str:
     """One context caption for the whole clip: bold, all capitals, coloured, thick black outline, *in asterisks*."""
     text = _clean(text).upper()
     if text and not text.startswith("*"):
@@ -97,6 +97,7 @@ def _meme(text: str, duration: float, highlight: str, layout: str, picture=None)
         bottom = int(top + ph * 0.83)       # same spot as the example: low on the picture, not on the bar
     else:
         bottom = {"split": 760}.get(layout, 1480)
+    bottom = _at(bottom, position)
     out = MEME_HEADER.format(bgr=bgr)
     if text:
         body = "\\N".join(_wrap(text))
@@ -136,7 +137,7 @@ def _keyword(group) -> int:
     return best
 
 
-def _edit(words, duration, highlight, hook, layout, picture) -> str:
+def _edit(words, duration, highlight, hook, layout, picture, position="auto") -> str:
     """Edit-page captions: 1-3 words in the middle of the picture, revealed word by word, one keyword per
     chunk coloured (rotating green / red / yellow) with a soft glow."""
     if picture:
@@ -146,6 +147,7 @@ def _edit(words, duration, highlight, hook, layout, picture) -> str:
     else:
         y = {"split": 690}.get(layout, 860)
         hook_y = {"split": 110}.get(layout, 250)
+    y = _at(y, position)
     first = HIGHLIGHTS.get(highlight, EDIT_COLOURS[0])
     colours = [first] + [c for c in EDIT_COLOURS if c != first]
     lines = [EDIT_HEADER.format(hook_y=hook_y)]
@@ -186,13 +188,36 @@ def _edit(words, duration, highlight, hook, layout, picture) -> str:
     return "\n".join(lines) + "\n"
 
 
+SIZES = {"small": 0.8, "medium": 1.0, "large": 1.2, "huge": 1.4}
+POSITIONS = {"top": 0.3, "middle": 0.5, "bottom": 0.76}    # height on the screen (share of 1920)
+
+
 def build(words, duration, style="pop", highlight="yellow", hook="", layout="blur", offset=0.0,
-          meme_text="", picture=None) -> str:
-    """`words` are timed against the source clip; `offset` is where the final cut starts inside it."""
+          meme_text="", picture=None, size="medium", position="auto") -> str:
+    """`words` are timed against the source clip; `offset` is where the final cut starts inside it.
+    `size` scales the caption text (small, medium, large, huge); `position` puts it at the top, middle or
+    bottom of the screen instead of the spot that suits the framing ("auto")."""
+    return _resize(_build(words, duration, style, highlight, hook, layout, offset, meme_text, picture, position),
+                   SIZES.get(size, 1.0))
+
+
+def _resize(ass: str, k: float) -> str:
+    """Scales the caption styles' font size (the hook keeps its own size)."""
+    if abs(k - 1.0) < 0.01:
+        return ass
+    return re.sub(r"^(Style: (?:Cap|Meme|Edit),[^,]+,)(\d+)",
+                  lambda m: f"{m.group(1)}{int(int(m.group(2)) * k)}", ass, flags=re.M)
+
+
+def _at(auto_y: int, position: str) -> int:
+    return int(1920 * POSITIONS[position]) if position in POSITIONS else auto_y
+
+
+def _build(words, duration, style, highlight, hook, layout, offset, meme_text, picture, position) -> str:
     if style == "meme":
-        return _meme(meme_text or hook, duration, highlight, layout, picture)
+        return _meme(meme_text or hook, duration, highlight, layout, picture, position)
     if style == "edit":
-        return _edit(_shift(words, offset, duration), duration, highlight, hook, layout, picture)
+        return _edit(_shift(words, offset, duration), duration, highlight, hook, layout, picture, position)
     st = STYLES.get(style, STYLES["pop"])
     colour = HIGHLIGHTS.get(highlight, HIGHLIGHTS["yellow"])
     # split: on the seam between panels; blur: in the blurred band under the picture; crop: lower third
@@ -202,6 +227,7 @@ def build(words, duration, style="pop", highlight="yellow", hook="", layout="blu
         top, ph = picture
         cap_y = int(top + ph * 0.78)                 # lower part of the picture
         hook_y = max(60, top - 150) if top >= 200 else top + 40   # on the top bar when there's room
+    cap_y = _at(cap_y, position)
     lines = [HEADER.format(size=st["size"], hook_y=hook_y)]
 
     hook = _clean(hook)

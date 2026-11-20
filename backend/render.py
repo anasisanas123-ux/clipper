@@ -102,6 +102,8 @@ def render(job_dir: Path, clip: dict, words: list, out: Path, music_path=None, p
 
     picture, box, card = None, None, None
     cap_style, hook = clip["caption_style"], clip.get("hook", "")
+    if clip.get("show_hook") is False:
+        hook = ""
     if layout in ("bars", "blur"):
         ph = picture_height(clip["layout_info"], clip.get("zoom"))
         picture = ((1920 - ph) // 2, ph)            # where the picture sits, so captions can sit on it
@@ -118,7 +120,8 @@ def render(job_dir: Path, clip: dict, words: list, out: Path, music_path=None, p
     ass_name = f"{clip['id']}.ass"
     (job_dir / ass_name).write_text(
         captions.build(words, dur, cap_style, clip["highlight"], hook,
-                       layout, offset=clip["trim_start"], meme_text=clip.get("context", ""), picture=picture),
+                       layout, offset=clip["trim_start"], meme_text=clip.get("context", ""), picture=picture,
+                       size=clip.get("caption_size") or "medium", position=clip.get("caption_position") or "auto"),
         "utf-8")
 
     look, _ = effects.split_look(clip.get("filter") or "none")

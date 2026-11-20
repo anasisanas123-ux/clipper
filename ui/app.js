@@ -159,6 +159,147 @@ function songSelectOptions(select, current, withAuto) {
   select.value = [...select.options].some((o) => o.value === current) ? current : '';
 }
 
+// ---------- template editor ----------
+// Every option a template holds, in one form. The same lists are used on each clip card.
+const TPL_CHOICES = {
+  layout: [['split', 'Facecam top, gameplay bottom'], ['bars', 'Black bars'], ['blur', 'Blurred background (same video)'],
+    ['crop', 'Centre crop (full screen)'], ['story', 'Story card (text above, video in a box)'], ['auto', 'Auto (picks per clip)']],
+  cam_pos: [['auto', 'Find it automatically'], ['tl', 'Top left'], ['tr', 'Top right'], ['bl', 'Bottom left'], ['br', 'Bottom right']],
+  split_game: [['fill', 'Fill the panel (crops the sides)'], ['fit', 'Show the whole game (blurred edges)']],
+  caption_style: [['pop', 'Word-by-word pop'], ['edit', 'Edit captions (coloured keywords)'], ['meme', 'Meme caption (one line, whole clip)'],
+    ['karaoke', 'Karaoke line'], ['clean', 'Clean'], ['none', 'No captions']],
+  caption_size: [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large'], ['huge', 'Huge']],
+  caption_position: [['auto', 'Best spot for the framing'], ['top', 'Top'], ['middle', 'Middle'], ['bottom', 'Bottom']],
+  highlight: ['yellow', 'green', 'cyan', 'pink', 'orange', 'white'].map((c) => [c, c]),
+  sfx_source: [['auto', 'My sounds first (built-in when I have none)'], ['mine', 'Only my sounds'], ['builtin', 'Only built-in sounds']],
+};
+const SOUND_ROLE_LABELS = { intro: 'Start of the clip', hit: 'Loud hits', big: 'Biggest hit', transition: 'Transitions (whip blur)', ending: 'Ending', emoji: 'Emoji pop-ups' };
+let tplEditing = null;   // id of the template open in the editor, '' for a new one
+
+async function openTemplates(id) {
+  if (!state.fx || !Object.keys(state.fx.presets || {}).length) await loadEffects();
+  if (!state.fx) return toast('Could not load the effects list. Is Clipper\'s engine running?', true);
+  drawTemplateList();
+  const list = (state.tpl && state.tpl.templates) || [];
+  editTemplate(id ?? (list[0] ? list[0].id : ''));
+  $('#templates').showModal();
+}
+
+function drawTemplateList() {
+  const list = (state.tpl && state.tpl.templates) || [];
+  $('#tpl-list').replaceChildren(...(list.length ? list.map((t) => h('button', {
+    type: 'button', class: 'tpl-item' + (t.id === tplEditing ? ' active' : ''), onclick: () => editTemplate(t.id),
+  }, h('b', {}, t.name + (state.tpl.default === t.id ? '  ★ default' : '')), h('span', { class: 'hint' }, describeStyle(t.style))))
+    : [h('p', { class: 'hint' }, 'No templates yet. Press "New template", or "Save as template" under any clip.')]));
+}
+
+function editTemplate(id) {
+  tplEditing = id;
+  drawTemplateList();
+  const t = ((state.tpl && state.tpl.templates) || []).find((x) => x.id === id);
+  const v = { ...(state.tpl.base || {}), ...((t && t.style) || {}) };
+  const sel = (key, choices, value) => {
+    const s = h('select', { name: key }, ...choices.map(([k, label]) => h('option', { value: k }, label)));
+    s.value = value ?? choices[0][0];
+    return s;
+  };
+  const num = (key, attrs) => h('input', { type: 'number', name: key, value: v[key] ?? '', ...attrs });
+  const box = (key, label, tip) => h('label', { class: 'row small', title: tip || '' },
+    h('input', { type: 'checkbox', name: key, checked: v[key] ?? true }), ' ' + label);
+  const fld = (label, control) => h('label', { class: 'field' }, h('span', {}, label), control);
+  const cat = state.fx || { presets: {}, filters: {} };
+
+  const name = h('input', { type: 'text', name: 'name', value: t ? t.name : '', placeholder: 'e.g. Gaming facecam', maxLength: 60 });
+  const layout = sel('layout', TPL_CHOICES.layout, v.layout);
+  const camPos = sel('cam_pos', TPL_CHOICES.cam_pos, v.cam_pos);
+  const splitGame = sel('split_game', TPL_CHOICES.split_game, v.split_game);
+  const zoom = num('zoom', { min: 30, max: 100 });
+  const song = h('select', { name: 'song' });
+  songSelectOptions(song, v.song || '', true);
+  const fixed = { ...(v.sfx_fixed || {}) };
+  const roleFields = Object.entries(SOUND_ROLE_LABELS).map(([role, label]) => {
+    const s = h('select', {});
+    soundOptions(s, fixed[role] || '');
+    s.options[0].textContent = 'Auto (fits the moment)';
+    s.addEventListener('change', () => { if (s.value) fixed[role] = s.value; else delete fixed[role]; });
+    return fld(label, s);
+  });
+  const splitBox = h('div', { class: 'grid2' }, fld('Where the facecam is in the stream', camPos), fld('Gameplay (bottom half)', splitGame));
+  const zoomBox = fld('Picture height % (bars / blurred)', zoom);
+  const showFraming = () => {
+    splitBox.hidden = !['split', 'auto'].includes(layout.value);
+    zoomBox.hidden = !['bars', 'blur'].includes(layout.value);
+  };
+  layout.addEventListener('change', showFraming);
+  const makeDefault = h('input', { type: 'checkbox', checked: !t ? !(state.tpl.templates || []).length : state.tpl.default === id });
+
+  const section = (title, ...kids) => h('fieldset', {}, h('legend', {}, title), ...kids);
+  const form = $('#tpl-form');
+  form.replaceChildren(
+    fld('Template name', name),
+    section('Framing', fld('Framing', layout), splitBox, zoomBox),
+    section('Captions',
+      h('div', { class: 'grid3' }, fld('Style', sel('caption_style', TPL_CHOICES.caption_style, v.caption_style)),
+        fld('Size', sel('caption_size', TPL_CHOICES.caption_size, v.caption_size)),
+        fld('Position', sel('caption_position', TPL_CHOICES.caption_position, v.caption_position))),
+      h('div', { class: 'grid3' }, fld('Highlight colour', sel('highlight', TPL_CHOICES.highlight, v.highlight))),
+      h('div', { class: 'opts' }, box('show_hook', 'Hook text for the first seconds'), box('progress_bar', 'Progress bar'))),
+    section('Effects and sounds',
+      h('div', { class: 'grid3' },
+        fld('Effects style', sel('effects_preset', Object.entries(cat.presets), v.effects_preset)),
+        fld('Colour filter', sel('filter', [['', 'Matches the effects style'], ...Object.entries(cat.filters)], v.filter || '')),
+        fld('Sounds to use', sel('sfx_source', TPL_CHOICES.sfx_source, v.sfx_source))),
+      h('div', { class: 'grid3' }, fld('Sound effects volume (0 – 1.5)', num('sfx_volume', { min: 0, max: 1.5, step: 0.05 }))),
+      h('details', {}, h('summary', { class: 'hint' }, 'Always use a particular sound for…'), h('div', { class: 'grid3' }, ...roleFields))),
+    section('Music',
+      h('div', { class: 'grid3' }, fld('Song', song), fld('Song volume (0.03 – 0.6)', num('music_volume', { min: 0.03, max: 0.6, step: 0.01 })))),
+    section('Timeline',
+      h('div', { class: 'opts' }, box('tighten', 'Cut pauses (jump cuts)'), box('cold_open', 'Cold open (teaser first)'),
+        box('track_face', 'Follow the face'), box('beat_sync', 'Effects on the song\'s beat'))),
+    section('Finding clips (for new videos made with this template)',
+      h('div', { class: 'grid3' }, fld('Clips per video', num('clip_count', { min: 1, max: 30 })),
+        fld('Shortest (sec)', num('min_len', { min: 5, max: 120 })), fld('Longest (sec)', num('max_len', { min: 10, max: 180 })))),
+    h('label', { class: 'row' }, makeDefault, ' Use this template for every new video'),
+    h('div', { class: 'actions' },
+      t ? h('button', { type: 'button', class: 'danger', onclick: () => deleteTemplate(t) }, 'Delete') : null,
+      t ? h('button', { type: 'button', onclick: () => saveForm(true) }, 'Save as a copy') : null,
+      h('button', { type: 'button', class: 'primary', onclick: () => saveForm(false) }, t ? 'Save changes' : 'Save template')));
+  showFraming();
+
+  async function saveForm(copy) {
+    const style = { sfx_fixed: { ...fixed } };
+    for (const el of form.querySelectorAll('[name]')) {
+      if (el.name === 'name') continue;
+      style[el.name] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? (el.value === '' ? null : +el.value) : el.value;
+    }
+    if (style.filter === '') style.filter = null;
+    if (style.min_len != null && style.max_len != null && style.min_len >= style.max_len) return toast('Shortest must be less than longest', true);
+    const nm = name.value.trim() || 'My template';
+    try {
+      const r = await api('/api/templates', { body: { id: copy ? undefined : (t && t.id), name: copy ? nm + ' (copy)' : nm, style, make_default: makeDefault.checked } });
+      if (!makeDefault.checked && t && state.tpl.default === t.id && !copy) await api('/api/templates/default', { body: { id: '' } });
+      await loadTemplates();
+      toast(`Template "${r.saved.name}" saved` + (makeDefault.checked ? '. New videos will use it.' : ''));
+      editTemplate(r.saved.id);
+    } catch (err) { toast(err.message, true); }
+  }
+}
+
+async function deleteTemplate(t) {
+  if (!confirm(`Delete the template "${t.name}"? Videos already made with it keep their look.`)) return;
+  try {
+    await api('/api/templates/' + t.id, { method: 'DELETE' });
+    await loadTemplates();
+    const list = state.tpl.templates || [];
+    editTemplate(list[0] ? list[0].id : '');
+  } catch (err) { toast(err.message, true); }
+}
+
+$('#open-templates').onclick = async () => { await loadTemplates(); openTemplates(); };
+$('#tpl-new').onclick = () => editTemplate('');
+$('#tpl-close').onclick = () => $('#templates').close();
+$('#settings-templates').onclick = async () => { await loadTemplates(); openTemplates(); };
+
 // ---------- job view ----------
 let pollTimer;
 async function poll() {
@@ -374,6 +515,10 @@ function buildCard(job, clip) {
   const showCaptionFields = () => { memeField.hidden = caps.value !== 'meme'; hookField.hidden = caps.value === 'meme'; };
   caps.addEventListener('change', showCaptionFields);
   const colour = h('select', {}, ...['yellow', 'green', 'cyan', 'pink', 'orange', 'white'].map((c) => h('option', {}, c)));
+  const capSize = h('select', {}, ...TPL_CHOICES.caption_size.map(([k, l]) => h('option', { value: k }, l)));
+  const capPos = h('select', {}, ...TPL_CHOICES.caption_position.map(([k, l]) => h('option', { value: k }, l)));
+  const showHook = h('input', { type: 'checkbox', checked: clip.show_hook !== false });
+  capSize.value = clip.caption_size || 'medium'; capPos.value = clip.caption_position || 'auto';
   const song = h('select', {});
   const volume = h('input', { type: 'range', min: 0.03, max: 0.6, step: 0.01, value: clip.music_volume });
   const bar = h('input', { type: 'checkbox', checked: !!clip.progress_bar });
@@ -445,12 +590,13 @@ function buildCard(job, clip) {
     start: draft.start, end: draft.end, story: storyText.value.trim(), comment: comment.value.trim(),
     tighten: tighten.box.checked, cold_open: coldOpen.box.checked, track_face: trackFace.box.checked, beat_sync: beatSync.box.checked,
     cam_pos: camPos.value, split_game: splitGame.value,
+    caption_size: capSize.value, caption_position: capPos.value, show_hook: showHook.checked,
     ...fx.value(),
   });
   // The look only (no text, cut or effect times), for a template.
   const STYLE = (state.tpl && state.tpl.keys) || [];
   const styleNow = () => { const b = settingsBody(); return Object.fromEntries(STYLE.filter((k) => k in b).map((k) => [k, b[k]])); };
-  const tplBtn = h('button', { class: 'link tpl', title: 'Save this clip\'s look (framing, facecam corner, captions, effects style, sounds, song, filter, timeline options) so new videos are made with it',
+  const tplBtn = h('button', { title: 'Save this clip\'s look (framing, facecam corner, captions, effects style, sounds, song, filter, timeline options) as a template, so new videos are made with it',
     onclick: () => saveTemplate(styleNow()) }, 'Save as template');
   async function doRender(preview) {
     try {
@@ -503,6 +649,8 @@ function buildCard(job, clip) {
         memeField, hookField,
         h('div', { class: 'grid2' }, field('Framing', layout, layoutNote), field('Captions', caps)),
         splitFields, zoomField, storyFields,
+        h('div', { class: 'grid2' }, field('Caption size', capSize), field('Caption position', capPos)),
+        h('label', { class: 'row small' }, showHook, ' Hook text for the first seconds'),
         h('div', { class: 'grid2' }, field('Highlight', colour), field('Song', song)),
         h('div', { class: 'grid2' }, field('Song volume', volume),
           h('label', { class: 'row' }, bar, ' Progress bar')),
@@ -776,19 +924,6 @@ const FIELDS = ['clip_count', 'min_len', 'max_len', 'default_layout', 'default_z
   'schedule_times', 'youtube_privacy', 'effects_preset', 'sfx_volume', 'channel_name', 'channel_handle', 'channel_avatar', 'tighten', 'cold_open', 'live_min_score', 'live_auto_render',
   'sfx_source', 'default_song', 'default_template', 'encoder', 'parallel_renders'];
 
-function showTemplateList() {
-  const list = (state.tpl && state.tpl.templates) || [];
-  $('#template-list').replaceChildren(...(list.length ? list.map((t) => h('div', { class: 'track' },
-    h('div', { class: 'grow' }, h('div', {}, t.name), h('div', { class: 'hint' }, describeStyle(t.style))),
-    h('button', { class: 'danger', type: 'button', onclick: async () => {
-      if (!confirm(`Delete the template "${t.name}"? Videos already made with it keep their look.`)) return;
-      state.tpl = await api('/api/templates/' + t.id, { method: 'DELETE' });
-      await loadTemplates();
-      fillTemplateSelect($('#s-default_template'), state.tpl.default, 'None (use the settings above)');
-      showTemplateList();
-    } }, 'Delete'))) : [h('p', { class: 'hint' }, 'No templates yet.')]));
-}
-
 function describeStyle(s) {
   const framing = { bars: 'black bars', blur: 'blurred background', auto: 'auto framing', crop: 'full-screen crop', split: 'facecam + gameplay', story: 'story card' };
   const corner = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right' };
@@ -885,7 +1020,6 @@ function fillSettings(s) {
   state.settings = s;
   songSelectOptions($('#s-default_song'), s.default_song, true);
   fillTemplateSelect($('#s-default_template'), s.default_template, 'None (use the settings above)');
-  showTemplateList();
   for (const f of FIELDS) {
     const el = $('#s-' + f);
     if (el.type === 'checkbox') el.checked = !!s[f];

@@ -4,6 +4,7 @@ Claude goes through Anthropic's own SDK. Every other provider is reached through
 Chat Completions API, which OpenAI, Gemini, Groq, DeepSeek, OpenRouter, xAI and local Ollama all offer."""
 import json
 import re
+import time
 
 import anthropic
 import httpx
@@ -159,11 +160,7 @@ def _compatible(settings, provider, model, system, user, schema):
                                              {"role": "user", "content": prompt}]}
         if fmt:
             body["response_format"] = fmt
-        try:
-            r = httpx.post(base + "/chat/completions", json=body, headers=_headers(key, provider),
-                           timeout=httpx.Timeout(900, connect=20))
-        except httpx.HTTPError as e:
-            raise AIError(friendly(e, provider))
+        r = _post_retrying(base + "/chat/completions", body, _headers(key, provider), provider)
         if r.status_code in (400, 422) and fmt and re.search(r"response_format|json|schema", r.text, re.I):
             last = r
             continue
@@ -179,6 +176,32 @@ def _compatible(settings, provider, model, system, user, schema):
         return text, {"model": data.get("model") or model, "input_tokens": usage.get("prompt_tokens"),
                       "output_tokens": usage.get("completion_tokens"), "cost_usd": None}
     _check(last, provider)
+
+
+RETRY_WAITS = (8, 25, 60)   # seconds between attempts when the provider is busy or rate-limited
+
+
+def _post_retrying(url, body, headers, provider):
+    """POST that waits and tries again when the provider says it is overloaded (503, "high demand") or
+    rate-limited (429), which is usually over within a minute. A used-up daily quota still fails at the end."""
+    for attempt in range(len(RETRY_WAITS) + 1):
+        try:
+            r = httpx.post(url, json=body, headers=headers, timeout=httpx.Timeout(900, connect=20))
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
+            if attempt == len(RETRY_WAITS):
+                raise AIError(friendly(e, provider))
+            time.sleep(RETRY_WAITS[attempt])
+            continue
+        except httpx.HTTPError as e:
+            raise AIError(friendly(e, provider))
+        if r.status_code not in (429, 500, 502, 503, 504) or attempt == len(RETRY_WAITS):
+            return r
+        try:
+            wait = min(90.0, float(r.headers.get("retry-after", "")))
+        except ValueError:
+            wait = RETRY_WAITS[attempt]
+        time.sleep(wait)
+    return r
 
 
 def _check(r, provider):

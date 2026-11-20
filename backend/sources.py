@@ -127,9 +127,35 @@ def download_low(url: str, out_dir: Path, progress) -> Path:
 
 
 def needs_full_download(platform: str) -> bool:
-    """YouTube refuses ffmpeg's direct requests for sections of HD video (403 Forbidden), so YouTube videos
-    are downloaded whole by yt-dlp, which fetches them in chunks it accepts. Kick serves HLS, which cuts fine."""
-    return platform == "YouTube"
+    """No platform needs the whole video downloaded any more: each clip's part is cut straight from the stream
+    (and if YouTube refuses that, download_section fetches just that part). Downloading a long stream whole
+    took hours and tens of gigabytes before the first clip could render."""
+    return False
+
+
+def download_section(url: str, start: float, end: float, out: Path, max_height: int) -> None:
+    """Just [start, end] of an online video, cut on the exact frames, through yt-dlp's own downloader. Used when
+    the direct cut is refused (YouTube sometimes answers ffmpeg's requests with 403 Forbidden)."""
+    import yt_dlp
+    fmt = (f"bestvideo[height<={max_height}][vcodec^=avc1]+bestaudio[ext=m4a]/"
+           f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best")
+    stem = out.with_name(out.stem + "_dl")
+    for old in out.parent.glob(stem.name + ".*"):
+        old.unlink(missing_ok=True)
+    with _ydl({"noplaylist": True, "format": fmt, "merge_output_format": "mp4", "outtmpl": str(stem) + ".%(ext)s",
+               "download_ranges": yt_dlp.utils.download_range_func(None, [(max(0.0, start), end)]),
+               "force_keyframes_at_cuts": True}) as y:
+        y.download([url])
+    got = next((p for p in out.parent.glob(stem.name + ".*") if p.suffix in (".mp4", ".mkv", ".webm")), None)
+    if not got:
+        raise RuntimeError("The video section didn't download.")
+    # same encoding as a direct cut, so everything after this step sees the same kind of file
+    try:
+        config.run_ffmpeg(["-i", got, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", *config.video_encoder(),
+                           *config.quality_args(18), "-pix_fmt", config.pix_fmt(), "-c:a", "aac", "-b:a", "192k",
+                           out], timeout=1800)
+    finally:
+        got.unlink(missing_ok=True)
 
 
 def download_full(url: str, out: Path, max_height: int, progress) -> Path:

@@ -11,9 +11,11 @@ FILE = config.DATA / "templates.json"
 # Everything a template holds. "song" may be a track id, "" (no song), or "auto:mood" / "auto:rotate" to pick
 # from your music per clip. "sfx_fixed" maps an effect role (intro, hit, big, transition, ending, emoji) to a
 # sound you always want there; roles left out are chosen to fit the moment.
-KEYS = ("layout", "zoom", "cam_pos", "split_game", "caption_style", "highlight", "progress_bar", "song",
-        "music_volume", "effects_preset", "filter", "sfx_volume", "sfx_source", "sfx_fixed", "tighten",
-        "cold_open", "track_face", "beat_sync")
+KEYS = ("layout", "zoom", "cam_pos", "split_game", "caption_style", "caption_size", "caption_position",
+        "show_hook", "highlight", "progress_bar", "song", "music_volume", "effects_preset", "filter", "sfx_volume",
+        "sfx_source", "sfx_fixed", "tighten", "cold_open", "track_face", "beat_sync")
+# How the moments are found (not part of a clip's look): used when a video made with the template is analysed.
+FIND_KEYS = ("clip_count", "min_len", "max_len")
 _lock = threading.Lock()
 
 
@@ -38,7 +40,15 @@ def get(tid: str):
 
 
 def clean_style(style: dict) -> dict:
-    out = {k: style[k] for k in KEYS if k in style and style[k] is not None}
+    out = {k: style[k] for k in KEYS + FIND_KEYS if k in style and style[k] not in (None, "")}
+    for k, lo, hi in (("clip_count", 1, 30), ("min_len", 5, 120), ("max_len", 10, 180)):
+        if k in out:
+            try:
+                out[k] = int(max(lo, min(hi, float(out[k]))))
+            except (TypeError, ValueError):
+                out.pop(k)
+    if "min_len" in out and "max_len" in out and out["min_len"] >= out["max_len"]:
+        out.pop("min_len"), out.pop("max_len")
     if not isinstance(out.get("sfx_fixed"), dict):
         out.pop("sfx_fixed", None)
     else:
@@ -72,7 +82,8 @@ def base_style(settings: dict) -> dict:
     """The look from Settings, used when no template is chosen (and under a template, for anything it leaves out)."""
     return {"layout": settings.get("default_layout") or "bars", "zoom": settings.get("default_zoom") or 73,
             "cam_pos": "auto", "split_game": "fill",
-            "caption_style": settings["caption_style"], "highlight": settings["highlight"],
+            "caption_style": settings["caption_style"], "caption_size": "medium", "caption_position": "auto",
+            "show_hook": True, "highlight": settings["highlight"],
             "progress_bar": settings["progress_bar"], "song": settings.get("default_song", ""),
             "music_volume": settings["music_volume"], "effects_preset": settings.get("effects_preset") or "edit",
             "filter": None, "sfx_volume": settings.get("sfx_volume", 0.7),
@@ -86,5 +97,15 @@ def style_for(settings: dict, template_id=None) -> dict:
     style = base_style(settings)
     t = get(template_id if template_id is not None else settings.get("default_template"))
     if t:
-        style.update(clean_style(t.get("style") or {}))
+        style.update({k: v for k, v in clean_style(t.get("style") or {}).items() if k in KEYS})
     return style
+
+
+def find_settings(settings: dict, template_id) -> dict:
+    """Settings for finding moments, with the template's clip count and lengths when it sets them."""
+    t = get(template_id)
+    found = {k: v for k, v in clean_style((t or {}).get("style") or {}).items() if k in FIND_KEYS}
+    out = dict(settings, **found)
+    if out["min_len"] >= out["max_len"]:
+        out["min_len"], out["max_len"] = settings["min_len"], settings["max_len"]
+    return out
