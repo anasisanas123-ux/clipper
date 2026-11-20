@@ -1,42 +1,25 @@
-"""Templates: a saved look (framing, captions, effects, sounds, song, timeline options) that every new clip is
-made with, so videos come out the same way instead of following the built-in defaults."""
+"""The video setup: every choice about how a video's clips are made (framing and facecam, captions, effects,
+sounds, song, timeline options, how many clips and how long, and how the moments are picked). It is asked for
+each new video before any work starts, filled in with the choices made last time.
+
+Videos made with a template from an older version still use it; templates can no longer be made."""
 import json
-import threading
-import time
-import uuid
 
 from . import config
 
-FILE = config.DATA / "templates.json"
-# Everything a template holds. "song" may be a track id, "" (no song), or "auto:mood" / "auto:rotate" to pick
-# from your music per clip. "sfx_fixed" maps an effect role (intro, hit, big, transition, ending, emoji) to a
-# sound you always want there; roles left out are chosen to fit the moment.
+OLD_TEMPLATES = config.DATA / "templates.json"
+# A clip's look. "song" may be a track id, "" (no song), or "auto:mood" / "auto:rotate" to pick from your music
+# per clip. "sfx_fixed" maps an effect role (intro, hit, big, transition, ending, emoji) to a sound you always
+# want there; roles left out are chosen to fit the moment. "cam_box" is a facecam area marked by hand.
 KEYS = ("layout", "zoom", "cam_pos", "cam_box", "split_game", "caption_style", "caption_size", "caption_position",
         "show_hook", "highlight", "progress_bar", "song", "music_volume", "effects_preset", "filter", "sfx_volume",
         "sfx_source", "sfx_fixed", "tighten", "cold_open", "track_face", "beat_sync")
-# How the moments are found (not part of a clip's look): used when a video made with the template is analysed.
+# How the moments are found (not part of a clip's look).
 FIND_KEYS = ("clip_count", "min_len", "max_len")
-_lock = threading.Lock()
-
-
-def _read() -> list:
-    try:
-        data = json.loads(FILE.read_text("utf-8")) if FILE.exists() else []
-        return [t for t in data if isinstance(t, dict) and t.get("id")]
-    except Exception:
-        return []
-
-
-def _write(items):
-    FILE.write_text(json.dumps(items, indent=1, ensure_ascii=False), "utf-8")
-
-
-def all_templates() -> list:
-    return _read()
-
-
-def get(tid: str):
-    return next((t for t in _read() if t["id"] == tid), None) if tid else None
+# About the video itself.
+VIDEO_KEYS = ("kind", "topic", "scorer")
+KINDS = ("irl", "gaming", "film", "podcast")
+SCORERS = ("builtin", "ai", "chat")
 
 
 def clean_style(style: dict) -> dict:
@@ -63,30 +46,19 @@ def clean_style(style: dict) -> dict:
     return out
 
 
-def save(name: str, style: dict, tid: str = None) -> dict:
-    name = (name or "").strip()[:60] or "My template"
-    with _lock:
-        items = _read()
-        old = next((t for t in items if t["id"] == tid or (not tid and t["name"].lower() == name.lower())), None)
-        if old:   # same name (or id): update it rather than making a duplicate
-            old.update(name=name, style=clean_style(style), updated=time.time())
-            t = old
-        else:
-            t = {"id": uuid.uuid4().hex[:8], "name": name, "style": clean_style(style), "updated": time.time()}
-            items.append(t)
-        _write(items)
-    return t
-
-
-def delete(tid: str) -> None:
-    with _lock:
-        _write([t for t in _read() if t["id"] != tid])
-    if config.load_settings().get("default_template") == tid:
-        config.save_settings({"default_template": ""})
+def clean_setup(setup: dict) -> dict:
+    """A video's setup as sent from the app, checked."""
+    setup = setup or {}
+    out = clean_style(setup)
+    out["kind"] = setup.get("kind") if setup.get("kind") in KINDS else "irl"
+    out["topic"] = str(setup.get("topic") or "").strip()[:80]
+    if setup.get("scorer") in SCORERS:
+        out["scorer"] = setup["scorer"]
+    return out
 
 
 def base_style(settings: dict) -> dict:
-    """The look from Settings, used when no template is chosen (and under a template, for anything it leaves out)."""
+    """Starting values for everything a clip's look holds."""
     return {"layout": settings.get("default_layout") or "bars", "zoom": settings.get("default_zoom") or 73,
             "cam_pos": "auto", "cam_box": None, "split_game": "fill",
             "caption_style": settings["caption_style"], "caption_size": "medium", "caption_position": "auto",
@@ -99,20 +71,44 @@ def base_style(settings: dict) -> dict:
             "track_face": True, "beat_sync": True}
 
 
-def style_for(settings: dict, template_id=None) -> dict:
-    """The look for a new clip: Settings' defaults, with the chosen (or default) template on top."""
+def defaults(settings: dict) -> dict:
+    """What the setup window starts with: the choices made for the last video, or the starting values."""
+    out = base_style(settings) | {k: settings[k] for k in FIND_KEYS}
+    out |= {"kind": "irl", "topic": "", "scorer": settings.get("scorer", "builtin")}
+    last = settings.get("last_setup") or {}
+    out |= {k: v for k, v in clean_setup(last).items() if k != "topic"} if last else {}
+    return out
+
+
+def _old_template(template_id):
+    try:
+        items = json.loads(OLD_TEMPLATES.read_text("utf-8")) if template_id and OLD_TEMPLATES.exists() else []
+    except Exception:
+        return None
+    return next((t for t in items if isinstance(t, dict) and t.get("id") == template_id), None)
+
+
+def _chosen(job) -> dict:
+    """The video's setup, or (for a video made by an older version) its template's."""
+    if job.get("setup"):
+        return job["setup"]
+    t = _old_template(job.get("template"))
+    return clean_style(t.get("style") or {}) if t else {}
+
+
+def job_style(settings: dict, job: dict) -> dict:
+    """The look for a new clip of this video."""
     style = base_style(settings)
-    t = get(template_id if template_id is not None else settings.get("default_template"))
-    if t:
-        style.update({k: v for k, v in clean_style(t.get("style") or {}).items() if k in KEYS})
+    style.update({k: v for k, v in _chosen(job).items() if k in KEYS})
     return style
 
 
-def find_settings(settings: dict, template_id) -> dict:
-    """Settings for finding moments, with the template's clip count and lengths when it sets them."""
-    t = get(template_id)
-    found = {k: v for k, v in clean_style((t or {}).get("style") or {}).items() if k in FIND_KEYS}
-    out = dict(settings, **found)
+def job_settings(settings: dict, job: dict) -> dict:
+    """Settings for finding this video's moments: its clip count, lengths and way of picking them."""
+    chosen = _chosen(job)
+    out = dict(settings, **{k: v for k, v in chosen.items() if k in FIND_KEYS})
+    if chosen.get("scorer") in SCORERS:
+        out["scorer"] = chosen["scorer"]
     if out["min_len"] >= out["max_len"]:
         out["min_len"], out["max_len"] = settings["min_len"], settings["max_len"]
     return out

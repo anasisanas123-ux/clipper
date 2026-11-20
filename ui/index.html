@@ -12,16 +12,8 @@
   <form id="new-job">
     <input id="url" type="text" placeholder="Paste a Kick, YouTube or Twitch link (past video or live now), or drop a video file" autocomplete="off" spellcheck="false">
     <button type="button" id="pick-file" title="Use a video that's already on this PC">Add file</button>
-    <select id="kind" title="What kind of video this is">
-      <option value="irl">IRL / chatting</option>
-      <option value="gaming">Gaming</option>
-      <option value="podcast">Podcast / interview</option>
-      <option value="film">Film / TV reaction</option>
-    </select>
-    <input id="topic" type="text" placeholder="Topic (e.g. GTA 6)" autocomplete="off">
     <button class="primary" type="submit">Find clips</button>
   </form>
-  <button id="open-templates" title="Make and edit templates: the look every new video is made with">Templates</button>
   <button id="open-music">Music</button>
   <button id="open-results" title="How your uploaded Shorts actually did">Results</button>
   <button id="open-settings">Settings</button>
@@ -46,11 +38,8 @@
   <form method="dialog" class="modal">
     <h2>Settings</h2>
     <fieldset>
-      <legend>Virality scoring (picks the moments, scores them, writes titles and hashtags)</legend>
-      <label class="choice"><input type="radio" name="scorer" value="builtin">
-        <span><b>Built-in algorithm</b><br><span class="hint">Free and runs on this PC. Uses loudness and speech cues; titles are taken straight from the transcript.</span></span></label>
-      <label class="choice"><input type="radio" name="scorer" value="ai">
-        <span><b>Connected AI model</b><br><span class="hint">Reads the whole transcript, so it judges what's actually said and writes real titles and hooks. Needs an API key (except Ollama), and the transcript is sent to that provider.</span></span></label>
+      <legend>Connected AI model</legend>
+      <p class="hint">Only used for videos where you choose "Connected AI model" in the setup window. It reads the whole transcript to pick the moments and write titles. Needs an API key (except Ollama), and the transcript is sent to that provider.</p>
       <div id="ai-box">
         <label>Provider <select id="ai-provider"></select></label>
         <label id="ai-base-row">Address (base URL) <input type="text" id="s-custom_base_url" placeholder="https://…/v1" spellcheck="false"></label>
@@ -68,54 +57,16 @@
       <p class="hint" id="ai-state"></p>
     </fieldset>
     <fieldset>
-      <legend>Clips</legend>
+      <legend>Video quality</legend>
       <div class="grid3">
-        <label>Clips per stream <input type="number" id="s-clip_count" min="1" max="20"></label>
-        <label>Shortest (sec) <input type="number" id="s-min_len" min="5" max="120"></label>
-        <label>Longest (sec) <input type="number" id="s-max_len" min="10" max="180"></label>
-      </div>
-      <div class="grid3">
-        <label>Default framing
-          <select id="s-default_layout"><option value="bars">Black bars</option><option value="blur">Blurred background (same video)</option><option value="auto">Auto</option><option value="crop">Centre crop (full screen)</option><option value="split">Facecam + gameplay</option><option value="story">Story card (text above, video in a box)</option></select>
-        </label>
-        <label>Default zoom (picture height %)
-          <input type="number" id="s-default_zoom" min="30" max="100" title="73 matches the example; higher means smaller bars">
-        </label>
-        <label>Captions
-          <select id="s-caption_style"><option value="meme">Meme caption</option><option value="edit">Edit captions (coloured keywords)</option><option value="pop">Word-by-word pop</option><option value="karaoke">Karaoke line</option><option value="clean">Clean</option><option value="none">None</option></select>
-        </label>
-        <label>Highlight colour
-          <select id="s-highlight"><option>yellow</option><option>green</option><option>cyan</option><option>pink</option><option>orange</option><option>white</option></select>
-        </label>
         <label>Max quality
           <select id="s-max_height"><option value="1080">1080p</option><option value="720">720p</option></select>
         </label>
       </div>
-      <label class="row"><input type="checkbox" id="s-progress_bar"> Progress bar along the bottom of each Short</label>
-      <label class="row"><input type="checkbox" id="s-tighten"> Cut silent pauses out of new clips (jump cuts; loud action is never cut)</label>
-      <label class="row"><input type="checkbox" id="s-cold_open"> Start new clips with a 2-second teaser of the payoff (cold open)</label>
     </fieldset>
     <fieldset>
-      <legend>Effects and sound effects (each clip can be changed on its own)</legend>
-      <div class="grid3">
-        <label>Default effects style
-          <select id="s-effects_preset"><option value="edit">Edit (like viral edit pages)</option><option value="hype">Hype / meme</option><option value="subtle">Subtle</option><option value="cinematic">Cinematic</option><option value="none">None</option></select>
-        </label>
-        <label>Sound effects volume <input type="number" id="s-sfx_volume" min="0" max="1.5" step="0.05"></label>
-        <label>Sounds to use
-          <select id="s-sfx_source"><option value="auto">My sounds first (built-in when I have none)</option><option value="mine">Only my sounds</option><option value="builtin">Only the built-in sounds</option></select>
-        </label>
-        <label>Song for new clips <select id="s-default_song"></select></label>
-      </div>
-      <p class="hint">Zoom punches, flashes, shakes and booms are placed on the loudest moments, with an emoji ending. Your own sounds are matched to the moment by their file name (a "kaching" or "money" sound on money talk, "fail" or "bruh" sounds on fails, "huh"/"shock" sounds on surprises, booms and punches on the loud hits). The built-in sounds are generated by Clipper, so they're copyright-free. <button type="button" class="link" id="open-sfx-folder">Add your own sounds</button></p>
-    </fieldset>
-    <fieldset>
-      <legend>Templates (your own look for every video)</legend>
-      <p class="hint">A template sets everything about how clips are made: framing (including facecam on top with gameplay below), captions, effects, sounds, song, filter, timeline options and how many clips to find. It is applied to every clip of a new video before anything is rendered.</p>
-      <div class="grid3">
-        <label>Template for new videos <select id="s-default_template"></select></label>
-      </div>
-      <div class="actions left"><button type="button" id="settings-templates">Make or edit templates…</button></div>
+      <legend>Your sounds and songs</legend>
+      <p class="hint">Your own sound effects are matched to the moment by their file name (a "kaching" or "money" sound on money talk, "fail" or "bruh" sounds on fails, "huh"/"shock" sounds on surprises, booms and punches on the loud hits). The built-in sounds are generated by Clipper, so they're copyright-free. <button type="button" class="link" id="open-sfx-folder">Add your own sounds</button></p>
     </fieldset>
     <fieldset>
       <legend>Story card header (for the "Story card" framing)</legend>
@@ -205,14 +156,9 @@
   <div class="modal wide">
     <h2>Mark the facecam</h2>
     <p class="hint">Drag a box around the facecam. The dashed outline is what the top panel will show: it is widened or heightened a little to fit the panel without stretching.</p>
-    <div class="mk-wrap" id="mk-wrap">
-      <img id="mk-img" alt="A frame from the video" draggable="false">
-      <div class="mk-fit" id="mk-fit" hidden></div>
-      <div class="mk-box" id="mk-box" hidden></div>
-      <div class="mk-wait" id="mk-wait">Getting a frame from the video…</div>
-    </div>
+    <div id="mk-host"></div>
     <div class="mk-bottom">
-      <div class="mk-preview"><span class="hint">Top panel preview</span><canvas id="mk-canvas" width="324" height="202"></canvas></div>
+      <div class="mk-preview" id="mk-prev-host"><span class="hint">Top panel preview</span></div>
       <div class="mk-side">
         <label class="row" id="mk-all-row"><input type="checkbox" id="mk-all" checked> Use this area for every clip in this video (clips already rendered with the facecam framing are rendered again)</label>
         <div class="actions">
@@ -224,31 +170,15 @@
   </div>
 </dialog>
 
-<dialog id="pick-template">
-  <div class="modal">
-    <h2>Which template?</h2>
-    <p class="hint" id="pick-source"></p>
-    <div id="pick-list" class="pick-list"></div>
-    <div class="actions">
-      <button type="button" class="link" id="pick-edit">Make or edit templates…</button>
-      <button type="button" id="pick-cancel">Cancel</button>
-      <button type="button" class="primary" id="pick-start">Start</button>
-    </div>
-  </div>
-</dialog>
-
-<dialog id="templates">
+<dialog id="setup">
   <div class="modal wide">
-    <h2>Templates</h2>
-    <p class="hint">Every clip of a new video is set up with the chosen template before it is rendered. Clipper asks which template to use each time you press "Find clips"; the default is picked to start with. To change a video you already made, use "Apply a template…" on that video.</p>
-    <div class="tpl-layout">
-      <div class="tpl-side">
-        <div id="tpl-list" class="list"></div>
-        <button type="button" class="primary" id="tpl-new">+ New template</button>
-      </div>
-      <form id="tpl-form" class="tpl-form" onsubmit="return false"></form>
+    <h2>Set up this video</h2>
+    <p class="hint" id="setup-source"></p>
+    <form id="setup-form" class="setup-form" onsubmit="return false"></form>
+    <div class="actions">
+      <button type="button" id="setup-cancel">Cancel</button>
+      <button type="button" class="primary" id="setup-start">Start</button>
     </div>
-    <div class="actions"><button type="button" id="tpl-close">Close</button></div>
   </div>
 </dialog>
 

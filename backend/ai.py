@@ -1,5 +1,6 @@
 """Optional AI pass: a connected model reads the whole transcript and picks, titles, and scores the moments."""
 import json
+import re
 
 from . import moments, providers
 
@@ -300,3 +301,209 @@ def ideas(job: dict, clip: dict, settings: dict) -> dict:
     return {"titles": clean("titles", 100, 6), "hooks": clean("hooks", 60, 6),
             "contexts": [c.strip("*\"' ") for c in clean("contexts", 90, 4)], "stories": clean("stories", 400, 3),
             "by": info["provider"]}
+
+
+# ---------------------------------------------------------------- your own chatbot (copy and paste)
+# For people without a usable API key: Clipper writes the prompt, you paste it into ChatGPT, Claude or any chatbot
+# on the web, and paste its answer back. Long videos are split into parts that fit in one chat message.
+PART_CHARS = 90_000          # transcript characters per prompt: fits the message box of the common chat sites
+EXAMPLE = {"moments": [{
+    "start_sec": 1234, "end_sec": 1281, "title": "Streamer gets caught lying to chat live",
+    "hook": "He did NOT expect this", "context": "bro realising chat saw everything",
+    "story": "Mid-stream, he swears he never [touched the money]. Then chat sends the [clip from yesterday]...",
+    "comment": "The pause before he answers says it all", "virality": 74, "hook_strength": 70, "emotion": 80,
+    "self_contained": 75, "shareability": 72, "mood": "funny",
+    "reasons": ["Clear setup and payoff in under a minute", "Huge reaction at the reveal"],
+    "hashtags": ["gta6", "streamer", "caughtlying"]}]}
+
+
+def chat_prompt(meta, segments, z, settings, want, part=None, flagged=None):
+    """The prompt to paste into a chatbot. `part` = (index, total, start, end) of a slice of the transcript;
+    `flagged` = list of (start, end) stretches when only the built-in engine's candidates are sent."""
+    length = int(meta.get("duration") or len(z))
+    by = f" by {meta['streamer']}" if meta.get("streamer") else ""
+    if flagged:
+        keep = [s for s in segments if any(s["end"] > a and s["start"] < b for a, b in flagged)]
+        scope = (f"To keep this short, the transcript below only has the {len(flagged)} stretches of the video that "
+                 f"a loudness and speech detector flagged as promising (the gaps between them are left out). Only "
+                 f"pick moments inside them.")
+    elif part:
+        i, total, a, b = part
+        keep = [s for s in segments if s["end"] > a and s["start"] < b]
+        scope = (f"The video is long, so its transcript comes in {total} parts. This is part {i} of {total}, "
+                 f"covering {int(a)} to {int(b)} seconds." if total > 1 else "")
+    else:
+        keep, scope = segments, ""
+    head = (f"Video: \"{meta.get('title')}\"{by}. Length: {length} seconds.\n"
+            f"{KIND_NOTES.get(meta.get('kind'), KIND_NOTES['irl'])}"
+            f"{' Topic: ' + meta['topic'] + '.' if meta.get('topic') else ''}\n{scope}\n\n")
+    ask = (f"Return the {want} best moments (fewer if there aren't that many worth clipping), each between "
+           f"{settings['min_len']} and {settings['max_len']} seconds long. start_sec and end_sec are seconds from the "
+           f"start of the video, the same numbers as in the transcript.\n\n"
+           f"Answer straight away: don't ask any questions, don't describe a plan, and don't wait for more parts. "
+           f"The transcript already has timestamps (the number at the start of each line is seconds).\n\n"
+           f"Reply with ONLY a JSON object, no other text before or after it, in exactly this format:\n"
+           f"{json.dumps(EXAMPLE, ensure_ascii=False)}\n"
+           f"mood is one of: hype, funny, tense, chill, emotional, rage.")
+    return (f"{SYSTEM}\n\n---\n\n{head}<transcript>\n{_transcript_lines(keep, z)}\n</transcript>\n\n{ask}")
+
+
+def _json_items(text):
+    """The moments list from a JSON answer (with or without code fences or text around it), or None."""
+    try:
+        data = providers._parse(text)
+    except providers.AIError:
+        start, end = text.find("["), text.rfind("]")          # some chatbots answer with just the list
+        try:
+            data = json.loads(text[start:end + 1]) if 0 <= start < end else None
+        except ValueError:
+            data = None
+    items = data.get("moments") if isinstance(data, dict) else data if isinstance(data, list) else None
+    return items if isinstance(items, list) and any(isinstance(m, dict) for m in items) else None
+
+
+def parse_chat_answer(text, segments, meta, settings, length):
+    """Moments from a chatbot's pasted answer: Clipper's JSON format, or a normal written list of clips (with
+    timestamps like 12:34 - 13:10, or quoted opening and closing lines that are looked up in the transcript)."""
+    text = text or ""
+    items = _json_items(text)
+    if items is None:
+        items = _text_items(text, segments)
+    if not items:
+        if re.search(r"\?\s*$", text.strip()) or re.search(r"\b(do you want|would you like|should i)\b", text, re.I):
+            raise ValueError("The chatbot asked a question instead of listing clips. Reply to it with: \"Don't ask "
+                             "questions. List the clips now, in the format from my first message.\" Then paste its "
+                             "new answer here.")
+        raise ValueError("No clips found in that answer. Paste the chatbot's whole reply: either the JSON part "
+                         "(starting with { \"moments\"), or its list of clips with their times.")
+    info = {"provider": "your chatbot"}
+    out = []
+    for m in items:
+        if not isinstance(m, dict):
+            continue
+        try:
+            start, end = float(m.get("start_sec")), float(m.get("end_sec"))
+        except (TypeError, ValueError):
+            continue
+        if end <= start or start >= length:
+            continue
+        start, end = moments.snap(segments, start, end, settings["min_len"], settings["max_len"], length)
+        out.append(_build(m, start, end, segments, meta, info))
+    if not out:
+        raise ValueError("None of the clips in that answer had times Clipper could match to the video. Ask the "
+                         "chatbot to give each clip's start and end time (for example 12:34 - 13:10).")
+    return out
+
+
+# ---- written answers (when the chatbot ignores the JSON format)
+_TIME = r"(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?"
+_RANGE_CLOCK = re.compile(rf"\[?({_TIME})\]?\s*(?:-|–|—|to|until|→|->)\s*\[?({_TIME})\]?", re.I)
+_RANGE_SECS = re.compile(r"\[?(\d{1,6}(?:\.\d+)?)\s*s?(?:ec(?:onds?)?)?\]?\s*(?:-|–|—|to|until|→|->)\s*\[?(\d{1,6}(?:\.\d+)?)\s*(?:s|sec|seconds?)?\b\]?", re.I)
+_LABEL = re.compile(r"^\s*(?:[-*•]\s*)?(?:\*\*)?\s*([A-Za-z][A-Za-z /&']{1,40}?)\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.+)$")
+_HEADING = re.compile(r"^\s*(?:#{1,6}\s*|\*\*\s*)?(?:(?:clip|moment|short)\s*#?\s*\d+\b|\d{1,2}[.)](?=\s|$))", re.I)
+_QUOTE = re.compile(r"[\"“”‘’']([^\"“”]{6,200}?)[\"“”’']")
+_WORDS = re.compile(r"[a-z0-9']+")
+
+
+def _clock(s: str) -> float:
+    parts = [float(p) for p in s.split(":")]
+    return parts[0] * 3600 + parts[1] * 60 + parts[2] if len(parts) == 3 else parts[0] * 60 + parts[1]
+
+
+def _find_phrase(phrase, segments, after=0.0):
+    """When a quoted line is said: the start and end of the transcript line it best matches, or None."""
+    want = _WORDS.findall(phrase.lower())
+    if len(want) < 3:
+        return None
+    best, score = None, 0.0
+    for i, s in enumerate(segments):
+        if s["end"] < after:
+            continue
+        own = set(_WORDS.findall(s["text"].lower()))
+        if not own:
+            continue
+        # a quote can run on into the next line; a match on this line alone counts for a little more, so the
+        # line where the quote starts wins over the one before it
+        pair = own | set(_WORDS.findall((segments[i + 1]["text"] if i + 1 < len(segments) else "").lower()))
+        sc = max(sum(w in own for w in want) / len(want), sum(w in pair for w in want) / len(want) - 0.05)
+        if sc > score:
+            best, score = s, sc
+    return (best["start"], best["end"]) if best and score >= 0.6 else None
+
+
+def _untable(lines):
+    """Markdown tables (| Clip title | Start & end | ... |) turned into one labelled block per row, so each row
+    reads like a written clip: "Clip 1" then "Clip title: ...", "Start & end: ..."."""
+    out, i, n = [], 0, 0
+    cells = lambda l: [c.strip(" *") for c in l.strip().strip("|").split("|")]
+    while i < len(lines):
+        l = lines[i]
+        sep = lines[i + 1] if i + 1 < len(lines) else ""
+        if l.strip().startswith("|") and re.match(r"^\s*\|?\s*:?-{2,}", sep):
+            head = cells(l)
+            i += 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                n += 1
+                out.append(f"Clip {n}")
+                out += [f"{k}: {v}" for k, v in zip(head, cells(lines[i])) if k and v]
+                i += 1
+            continue
+        out.append(l)
+        i += 1
+    return out
+
+
+def _text_items(text, segments):
+    """Clips from a written answer: blocks split on numbered headings ("Clip 1", "1.", "### 2"), each with a time
+    range or quoted opening and closing lines, plus whatever title, rating and reasons it gives."""
+    lines = _untable([l.rstrip() for l in text.replace("\r", "").split("\n")])
+    blocks, cur = [], []
+    for l in lines:
+        if _HEADING.match(l) and cur:
+            blocks.append(cur)
+            cur = []
+        cur.append(l)
+    if cur:
+        blocks.append(cur)
+    out = []
+    for b in blocks:
+        body = "\n".join(b)
+        start = end = None
+        m = _RANGE_CLOCK.search(body)
+        if m:
+            start, end = _clock(m.group(1)), _clock(m.group(2))
+        else:
+            m = _RANGE_SECS.search(body)
+            if m and not re.search(r"/\s*10", body[m.start():m.end() + 3]):
+                start, end = float(m.group(1)), float(m.group(2))
+        fields = {}
+        for l in b:
+            lm = _LABEL.match(l.replace("|", " ").strip())
+            if lm:
+                fields.setdefault(lm.group(1).strip().lower(), lm.group(2).strip(" *"))
+        if start is None:
+            # no times: find the quoted opening and closing lines in the transcript
+            quotes = _QUOTE.findall(body)
+            opening = next((v for k, v in fields.items() if "open" in k or k.startswith("start")), None)
+            closing = next((v for k, v in fields.items() if "clos" in k or k.startswith("end")), None)
+            q_open = (_QUOTE.findall(opening) or [opening])[0] if opening else (quotes[0] if quotes else None)
+            q_close = (_QUOTE.findall(closing) or [closing])[0] if closing else (quotes[-1] if len(quotes) > 1 else None)
+            a = _find_phrase(q_open, segments) if q_open else None
+            if a:
+                z = _find_phrase(q_close, segments, after=a[0]) if q_close else None
+                start, end = a[0], (z[1] if z else a[1] + 30)
+        if start is None or end is None:
+            continue
+        if end < start:
+            start, end = end, start
+        head = re.sub(r"^\s*(?:#{1,6}\s*|\*\*\s*)?(?:(?:clip|moment|short)\s*#?\s*\d+|\d{1,2}[.)])\s*[:.\-–—]?\s*", "",
+                      b[0], flags=re.I).strip(" *#\"“”")
+        title = next((v for k, v in fields.items() if "title" in k), "") or (head if not _RANGE_CLOCK.search(head) else "")
+        rating = next((v for k, v in fields.items() if "viral" in k or "rating" in k or "score" in k), "")
+        r = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(10|100)", rating or body)
+        virality = (float(r.group(1)) * (10 if r.group(2) == "10" else 1)) if r else 60
+        why = next((v for k, v in fields.items() if "why" in k or "reason" in k), "")
+        hook = next((v for k, v in fields.items() if k.startswith("hook")), "")
+        out.append({"start_sec": start, "end_sec": end, "title": title.strip(" *\"“”")[:100], "virality": virality,
+                    "hook": hook.strip(" *\"“”")[:60], "reasons": [why] if why else [], "mood": "hype"})
+    return out

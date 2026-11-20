@@ -55,7 +55,7 @@ async function refreshJobs() {
     class: 'job-item' + (j.id === state.jobId ? ' active' : ''), onclick: () => openJob(j.id),
   },
     h('div', { class: 'job-title' }, j.title || j.url),
-    h('div', { class: 'job-sub' }, j.status === 'live' ? h('span', { class: 'live-dot' }, '● LIVE') : '', [j.streamer, j.status === 'analyzing' ? 'working…' : j.status === 'error' ? 'failed' : j.clips + ' moments'].filter(Boolean).join(' · ')),
+    h('div', { class: 'job-sub' }, j.status === 'live' ? h('span', { class: 'live-dot' }, '● LIVE') : '', [j.streamer, j.status === 'analyzing' ? 'working…' : j.status === 'waiting_chat' ? 'waiting for your chatbot' : j.status === 'error' ? 'failed' : j.clips + ' moments'].filter(Boolean).join(' · ')),
   )));
   if (!jobs.length) list.append(h('p', { class: 'hint' }, 'Nothing yet.'));
 }
@@ -100,11 +100,11 @@ $('#new-job').addEventListener('submit', async (e) => {
   e.preventDefault();
   const url = $('#url').value.trim();
   if (!url) return;
-  // Nothing starts until a template is chosen: every clip of the video is set up with it before rendering.
-  const template = await chooseTemplate(url);
-  if (template == null) return;
+  // Nothing starts until every choice for this video is made in the setup window.
+  const setup = await openSetup(url);
+  if (!setup) return;
   try {
-    const job = await api('/api/jobs', { body: { url, kind: $('#kind').value, topic: $('#topic').value.trim(), template } });
+    const job = await api('/api/jobs', { body: { url, setup } });
     $('#url').value = '';
     openJob(job.id);
   } catch (err) { toast(err.message, true); }
@@ -114,7 +114,6 @@ $('#new-job').addEventListener('submit', async (e) => {
 // The area is kept as shares of the frame (0-1), so it fits the video at any resolution. The backend widens or
 // heightens it to the facecam panel's shape (1080 x 672) without stretching; the dashed outline shows that.
 const PANEL = 1080 / 672;
-let mk = null;   // { resolve, box, natural: [w, h] } while the marker is open
 
 function fitPanel(b, W, H) {
   let cx = (b.x + b.w / 2) * W, cy = (b.y + b.h / 2) * H, cw = b.w * W, ch = b.h * H;
@@ -124,166 +123,89 @@ function fitPanel(b, W, H) {
   return { x, y, w: cw, h: ch };
 }
 
-function markFacecam(imgUrl, initial, showAll) {
-  return new Promise((resolve) => {
-    mk = { resolve, box: initial || null, natural: null };
-    const img = $('#mk-img');
-    $('#mk-wait').hidden = false; $('#mk-wait').textContent = 'Getting a frame from the video…';
-    $('#mk-box').hidden = $('#mk-fit').hidden = true; $('#mk-save').disabled = true;
-    $('#mk-all-row').hidden = !showAll;
-    img.onload = () => { $('#mk-wait').hidden = true; mk.natural = [img.naturalWidth, img.naturalHeight]; drawMarker(); };
-    img.onerror = async () => {
-      let msg = 'Couldn\'t get a frame from this video.';
-      try { const r = await fetch(imgUrl); msg = (await r.json()).detail || msg; } catch {}
-      $('#mk-wait').textContent = msg;
+// A frame of the video that you drag a box on. `onChange(box)` runs when a drag ends.
+function makeMarker(onChange) {
+  const img = h('img', { alt: 'A frame from the video', draggable: false });
+  const fit = h('div', { class: 'mk-fit', hidden: true });
+  const box = h('div', { class: 'mk-box', hidden: true });
+  const wait = h('div', { class: 'mk-wait' }, 'Getting a picture from the video… (from a link this can take up to half a minute)');
+  const wrap = h('div', { class: 'mk-wrap' }, img, fit, box, wait);
+  const canvas = h('canvas', { class: 'mk-canvas', width: 324, height: 202 });
+  const m = { el: wrap, preview: canvas, box: null, natural: null, url: '' };
+  const usable = () => !!(m.box && m.box.w > 0.01 && m.box.h > 0.01);
+  function draw() {
+    const show = (el, r) => {
+      el.hidden = !r;
+      if (r) Object.assign(el.style, { left: r.x * img.clientWidth + 'px', top: r.y * img.clientHeight + 'px', width: r.w * img.clientWidth + 'px', height: r.h * img.clientHeight + 'px' });
     };
-    img.src = imgUrl + (imgUrl.includes('?') ? '&' : '?') + 'n=' + Date.now();
-    $('#cam-marker').showModal();
-  });
-}
-
-function drawMarker() {
-  if (!mk || !mk.natural) return;
-  const img = $('#mk-img'), b = mk.box;
-  const show = (el, r) => { el.hidden = !r; if (r) Object.assign(el.style, { left: r.x * img.clientWidth + 'px', top: r.y * img.clientHeight + 'px', width: r.w * img.clientWidth + 'px', height: r.h * img.clientHeight + 'px' }); };
-  const ok = b && b.w > 0.01 && b.h > 0.01;
-  show($('#mk-box'), ok ? b : null);
-  const [W, H] = mk.natural;
-  const f = ok ? fitPanel(b, W, H) : null;
-  show($('#mk-fit'), f ? { x: f.x / W, y: f.y / H, w: f.w / W, h: f.h / H } : null);
-  const cv = $('#mk-canvas'), ctx = cv.getContext('2d');
-  ctx.fillStyle = '#111'; ctx.fillRect(0, 0, cv.width, cv.height);
-  if (f) ctx.drawImage(img, f.x, f.y, f.w, f.h, 0, 0, cv.width, cv.height);
-  $('#mk-save').disabled = !ok;
-}
-
-(() => {
-  const wrap = $('#mk-wrap');
+    const good = !!m.natural && usable();
+    show(box, good ? m.box : null);
+    const f = good ? fitPanel(m.box, m.natural[0], m.natural[1]) : null;
+    show(fit, f ? { x: f.x / m.natural[0], y: f.y / m.natural[1], w: f.w / m.natural[0], h: f.h / m.natural[1] } : null);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#111'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (f) ctx.drawImage(img, f.x, f.y, f.w, f.h, 0, 0, canvas.width, canvas.height);
+  }
+  m.load = (url) => {
+    m.url = url; m.natural = null; wait.hidden = false; wait.textContent = 'Getting a picture from the video… (from a link this can take up to half a minute)'; draw();
+    img.onload = () => { wait.hidden = true; m.natural = [img.naturalWidth, img.naturalHeight]; draw(); };
+    img.onerror = async () => {
+      let msg = 'Couldn\'t get a picture from this video.';
+      try { const r = await fetch(url); msg = (await r.json()).detail || msg; } catch {}
+      wait.hidden = false; wait.textContent = msg;
+    };
+    img.src = url + (url.includes('?') ? '&' : '?') + 'n=' + Date.now();
+  };
+  m.set = (b) => { m.box = b ? { ...b } : null; draw(); };
+  m.value = () => (usable() ? Object.fromEntries(Object.entries(m.box).map(([k, v]) => [k, Math.round(v * 10000) / 10000])) : null);
   let start = null;
   const at = (e) => {
-    const r = $('#mk-img').getBoundingClientRect();
+    const r = img.getBoundingClientRect();
     return [Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)), Math.max(0, Math.min(1, (e.clientY - r.top) / r.height))];
   };
   wrap.addEventListener('pointerdown', (e) => {
-    if (!mk || !mk.natural) return;
+    if (!m.natural) return;
     start = at(e); wrap.setPointerCapture(e.pointerId); e.preventDefault();
   });
   wrap.addEventListener('pointermove', (e) => {
     if (!start) return;
     const [x, y] = at(e);
-    mk.box = { x: Math.min(x, start[0]), y: Math.min(y, start[1]), w: Math.abs(x - start[0]), h: Math.abs(y - start[1]) };
-    drawMarker();
+    m.box = { x: Math.min(x, start[0]), y: Math.min(y, start[1]), w: Math.abs(x - start[0]), h: Math.abs(y - start[1]) };
+    draw();
   });
-  wrap.addEventListener('pointerup', () => { start = null; });
-  window.addEventListener('resize', drawMarker);
-  const finish = (value) => { const m = mk; mk = null; $('#cam-marker').close(); if (m) m.resolve(value); };
-  $('#mk-save').onclick = () => finish({ box: Object.fromEntries(Object.entries(mk.box).map(([k, v]) => [k, Math.round(v * 10000) / 10000])), all: $('#mk-all').checked && !$('#mk-all-row').hidden });
-  $('#mk-cancel').onclick = () => finish(null);
-  $('#cam-marker').addEventListener('cancel', (e) => { e.preventDefault(); finish(null); });
-})();
+  wrap.addEventListener('pointerup', () => { if (start) { start = null; if (onChange) onChange(m.value()); } });
+  new ResizeObserver(draw).observe(wrap);
+  return m;
+}
 
-// ---------- "which template?" before a video starts ----------
-let pickResolve = null;    // set while the question is open (or parked while the template editor is open)
-let pickChoice = '';
+// The marker in its own window, for clips that have already been made.
+const clipMarker = makeMarker(() => { $('#mk-save').disabled = !clipMarker.value(); });
+$('#mk-host').append(clipMarker.el);
+$('#mk-prev-host').append(clipMarker.preview);
+let mkResolve = null;
 
-function chooseTemplate(url) {
-  return new Promise(async (resolve) => {
-    await loadTemplates();
-    if (!state.fx) await loadEffects();
-    pickResolve = resolve;
-    pickChoice = state.tpl.default || '';
-    const name = url.split(/[\\/]/).pop() || url;
-    $('#pick-source').textContent = `Every clip found in "${name.length > 70 ? name.slice(0, 67) + '…' : name}" will be made with the template you pick here, before anything is rendered.`;
-    drawPicks();
-    $('#pick-template').showModal();
+function markFacecam(imgUrl, initial, showAll) {
+  return new Promise((resolve) => {
+    mkResolve = resolve;
+    $('#mk-all-row').hidden = !showAll;
+    clipMarker.set(initial || null);
+    clipMarker.load(imgUrl);
+    $('#mk-save').disabled = !clipMarker.value();
+    $('#cam-marker').showModal();
   });
 }
+const mkFinish = (value) => { const r = mkResolve; mkResolve = null; $('#cam-marker').close(); if (r) r(value); };
+$('#mk-save').onclick = () => mkFinish({ box: clipMarker.value(), all: $('#mk-all').checked && !$('#mk-all-row').hidden });
+$('#mk-cancel').onclick = () => mkFinish(null);
+$('#cam-marker').addEventListener('cancel', (e) => { e.preventDefault(); mkFinish(null); });
 
-function drawPicks() {
-  const list = (state.tpl && state.tpl.templates) || [];
-  const card = (id, title, desc) => h('label', { class: 'pick' + (pickChoice === id ? ' active' : '') },
-    h('input', { type: 'radio', name: 'pick', value: id, checked: pickChoice === id, onchange: () => { pickChoice = id; drawPicks(); } }),
-    h('span', {}, h('b', {}, title), h('span', { class: 'hint' }, desc)));
-  $('#pick-list').replaceChildren(
-    ...list.map((t) => card(t.id, t.name + (state.tpl.default === t.id ? '  ★ default' : ''), describeStyle(t.style))),
-    card('', 'No template', 'Use the defaults from Settings'),
-    list.length ? null : h('p', { class: 'hint' }, 'You have no templates yet. "Make or edit templates…" creates one, then you come back here.'));
-}
-
-function finishPick(value) {
-  const done = pickResolve;
-  pickResolve = null;
-  $('#pick-template').close();
-  if (done) done(value);
-}
-
-$('#pick-start').onclick = () => finishPick(pickChoice);
-$('#pick-cancel').onclick = () => finishPick(null);
-$('#pick-template').addEventListener('cancel', (e) => { e.preventDefault(); finishPick(null); });   // Esc = cancel
-$('#pick-edit').onclick = async () => {
-  // park the question, open the editor; closing the editor brings the question back with the new templates
-  $('#pick-template').close();
-  await openTemplates(pickChoice || undefined);
-};
-
-// ---------- templates ----------
-// A template is a saved look (framing, facecam corner, captions, effects, sounds, song, filter, timeline options)
-// that every clip of a new video is made with.
-async function loadTemplates() {
-  try { state.tpl = await api('/api/templates'); } catch { state.tpl = { templates: [], default: '', auto_songs: {} }; }
-  const pick = $('#job-template');
-  if (pick) fillTemplateSelect(pick, '', 'Apply a template…');
-}
-
-function fillTemplateSelect(select, current, emptyLabel) {
-  const list = (state.tpl && state.tpl.templates) || [];
-  select.replaceChildren(h('option', { value: '' }, emptyLabel),
-    ...list.map((t) => h('option', { value: t.id }, t.name + (state.tpl.default === t.id && emptyLabel !== 'Apply a template…' ? ' (default)' : ''))));
-  select.value = list.some((t) => t.id === current) ? current : '';
-}
-
-async function saveTemplate(style) {
-  const list = (state.tpl && state.tpl.templates) || [];
-  const name = prompt('Name this template (an existing name updates that template):', list.length ? '' : 'My style');
-  if (name == null) return;
-  const makeDefault = confirm('Make every new video use this template?\n\nOK = yes, make it the default. Cancel = just save it (Clipper offers it every time you press "Find clips").');
-  try {
-    const r = await api('/api/templates', { body: { name, style, make_default: makeDefault } });
-    state.tpl = r;
-    await loadTemplates();
-    toast(`Template "${r.saved.name}" saved${makeDefault ? ' and used for every new video' : ''}`);
-  } catch (err) { toast(err.message, true); }
-}
-
-async function applyTemplateToJob() {
-  const id = $('#job-template').value;
-  if (!id) return toast('Pick a template first', true);
-  const name = state.tpl.templates.find((t) => t.id === id)?.name;
-  if (!confirm(`Give every clip in this video the "${name}" look? Clips already rendered are rendered again. Titles and text are kept.`)) return;
-  try {
-    const r = await api(`/api/jobs/${state.jobId}/apply-template`, { body: { id } });
-    // cards are rebuilt so their controls show the template's settings
-    state.cards.clear(); $('#j-clips').replaceChildren();
-    toast(`Template applied${r.queued ? `; ${r.queued} clip${r.queued === 1 ? '' : 's'} re-rendering` : ''}`);
-    poll();
-  } catch (err) { toast(err.message, true); }
-}
-
-function songSelectOptions(select, current, withAuto) {
-  const opts = [h('option', { value: '' }, 'No song')];
-  if (withAuto) for (const [k, v] of Object.entries((state.tpl && state.tpl.auto_songs) || {})) opts.push(h('option', { value: k }, v));
-  for (const t of state.tracks) opts.push(h('option', { value: t.id }, (t.source === 'mine' ? '★ ' : '') + t.title + (t.artist ? ' – ' + t.artist : '') + (t.mood ? ` (${t.mood})` : '')));
-  select.replaceChildren(...opts);
-  select.value = [...select.options].some((o) => o.value === current) ? current : '';
-}
-
-// ---------- template editor ----------
-// Every option a template holds, in one form. The same lists are used on each clip card.
-const TPL_CHOICES = {
+// ---------- setting up a new video ----------
+// Asked before every new video: everything about how its clips are made, filled in with the last video's choices.
+const CHOICES = {
   layout: [['split', 'Facecam top, gameplay bottom'], ['bars', 'Black bars'], ['blur', 'Blurred background (same video)'],
     ['crop', 'Centre crop (full screen)'], ['story', 'Story card (text above, video in a box)'], ['auto', 'Auto (picks per clip)']],
   cam_pos: [['auto', 'Find it automatically'], ['tl', 'Top left'], ['tr', 'Top right'], ['ml', 'Middle left'], ['mr', 'Middle right'],
-    ['bl', 'Bottom left'], ['br', 'Bottom right'], ['custom', 'Marked by hand']],
+    ['bl', 'Bottom left'], ['br', 'Bottom right'], ['custom', 'Drawn by hand']],
   split_game: [['fill', 'Fill the panel (crops the sides)'], ['fit', 'Show the whole game (blurred edges)']],
   caption_style: [['pop', 'Word-by-word pop'], ['edit', 'Edit captions (coloured keywords)'], ['meme', 'Meme caption (one line, whole clip)'],
     ['karaoke', 'Karaoke line'], ['clean', 'Clean'], ['none', 'No captions']],
@@ -291,50 +213,104 @@ const TPL_CHOICES = {
   caption_position: [['auto', 'Best spot for the framing'], ['top', 'Top'], ['middle', 'Middle'], ['bottom', 'Bottom']],
   highlight: ['yellow', 'green', 'cyan', 'pink', 'orange', 'white'].map((c) => [c, c]),
   sfx_source: [['auto', 'My sounds first (built-in when I have none)'], ['mine', 'Only my sounds'], ['builtin', 'Only built-in sounds']],
+  kind: [['irl', 'IRL / chatting'], ['gaming', 'Gaming'], ['podcast', 'Podcast / interview'], ['film', 'Film / TV reaction']],
 };
 const SOUND_ROLE_LABELS = { intro: 'Start of the clip', hit: 'Loud hits', big: 'Biggest hit', transition: 'Transitions (whip blur)', ending: 'Ending', emoji: 'Emoji pop-ups' };
-let tplEditing = null;   // id of the template open in the editor, '' for a new one
+const FRAME_SPOTS = [0.35, 0.5, 0.2, 0.65, 0.8, 0.1, 0.9];
 
-async function openTemplates(id) {
+async function loadSetupInfo() {
+  try { state.setup = await api('/api/setup'); } catch { state.setup = { defaults: {}, auto_songs: {}, ai_ready: false, ai_status: '' }; }
+}
+
+function songSelectOptions(select, current, withAuto) {
+  const opts = [h('option', { value: '' }, 'No song')];
+  if (withAuto) for (const [k, v] of Object.entries((state.setup && state.setup.auto_songs) || {})) opts.push(h('option', { value: k }, v));
+  for (const t of state.tracks) opts.push(h('option', { value: t.id }, (t.source === 'mine' ? '★ ' : '') + t.title + (t.artist ? ' – ' + t.artist : '') + (t.mood ? ` (${t.mood})` : '')));
+  select.replaceChildren(...opts);
+  select.value = [...select.options].some((o) => o.value === current) ? current : '';
+}
+
+let setupResolve = null;
+let setupCollect = null;
+
+async function openSetup(url) {
+  await loadSetupInfo();
   if (!state.fx || !Object.keys(state.fx.presets || {}).length) await loadEffects();
-  if (!state.fx) return toast('Could not load the effects list. Is Clipper\'s engine running?', true);
-  drawTemplateList();
-  const list = (state.tpl && state.tpl.templates) || [];
-  editTemplate(id ?? (list[0] ? list[0].id : ''));
-  $('#templates').showModal();
+  try { state.tracks = (await api('/api/music')).tracks; } catch {}
+  return new Promise((resolve) => {
+    setupResolve = resolve;
+    buildSetup(url);
+    $('#setup').showModal();
+    $('#setup-form').scrollTop = 0;
+  });
 }
+const setupFinish = (value) => { const r = setupResolve; setupResolve = null; $('#setup').close(); if (r) r(value); };
+$('#setup-cancel').onclick = () => setupFinish(null);
+$('#setup').addEventListener('cancel', (e) => { e.preventDefault(); setupFinish(null); });
+$('#setup-start').onclick = () => { const v = setupCollect && setupCollect(); if (v) setupFinish(v); };
 
-function drawTemplateList() {
-  const list = (state.tpl && state.tpl.templates) || [];
-  $('#tpl-list').replaceChildren(...(list.length ? list.map((t) => h('button', {
-    type: 'button', class: 'tpl-item' + (t.id === tplEditing ? ' active' : ''), onclick: () => editTemplate(t.id),
-  }, h('b', {}, t.name + (state.tpl.default === t.id ? '  ★ default' : '')), h('span', { class: 'hint' }, describeStyle(t.style))))
-    : [h('p', { class: 'hint' }, 'No templates yet. Press "New template", or "Save as template" under any clip.')]));
-}
-
-function editTemplate(id) {
-  tplEditing = id;
-  drawTemplateList();
-  const t = ((state.tpl && state.tpl.templates) || []).find((x) => x.id === id);
-  const v = { ...(state.tpl.base || {}), ...((t && t.style) || {}) };
+function buildSetup(url) {
+  const v = { ...((state.setup && state.setup.defaults) || {}) };
+  const name = url.split(/[\\/]/).pop() || url;
+  $('#setup-source').textContent = `How the clips from "${name.length > 70 ? name.slice(0, 67) + '…' : name}" are made. Nothing starts until you press Start. Filled in with what you chose last time.`;
   const sel = (key, choices, value) => {
     const s = h('select', { name: key }, ...choices.map(([k, label]) => h('option', { value: k }, label)));
     s.value = value ?? choices[0][0];
+    if (s.selectedIndex < 0) s.value = choices[0][0];
     return s;
   };
   const num = (key, attrs) => h('input', { type: 'number', name: key, value: v[key] ?? '', ...attrs });
   const box = (key, label, tip) => h('label', { class: 'row small', title: tip || '' },
     h('input', { type: 'checkbox', name: key, checked: v[key] ?? true }), ' ' + label);
-  const fld = (label, control) => h('label', { class: 'field' }, h('span', {}, label), control);
+  const fld = (label, control, extra) => h('label', { class: 'field' }, h('span', {}, label), control, extra || null);
+  const section = (title, ...kids) => h('fieldset', {}, h('legend', {}, title), ...kids);
   const cat = state.fx || { presets: {}, filters: {} };
 
-  const name = h('input', { type: 'text', name: 'name', value: t ? t.name : '', placeholder: 'e.g. Gaming facecam', maxLength: 60 });
-  const layout = sel('layout', TPL_CHOICES.layout, v.layout);
-  const camPos = sel('cam_pos', TPL_CHOICES.cam_pos, v.cam_pos);
-  const splitGame = sel('split_game', TPL_CHOICES.split_game, v.split_game);
+  // how the moments are picked
+  const ai = state.setup || {};
+  let scorer = v.scorer || 'builtin';
+  if (scorer === 'ai' && !ai.ai_ready) scorer = 'builtin';
+  const pick = (val, title, desc, disabled) => h('label', { class: 'pick' + (disabled ? ' off' : '') },
+    h('input', { type: 'radio', name: 'scorer', value: val, checked: scorer === val, disabled }), h('span', {}, h('b', {}, title), h('span', { class: 'hint' }, desc)));
+  const scorers = h('div', { class: 'pick-list' },
+    pick('builtin', 'Clipper\'s own engine', 'Free and runs on this PC: the clips are made straight after transcribing.'),
+    pick('chat', 'Your chatbot (ChatGPT, Claude, Gemini…)', 'Free. After transcribing, Clipper gives you a prompt to paste into a chatbot and waits for its answer.'),
+    pick('ai', 'Connected AI model', ai.ai_ready ? `Uses ${ai.ai_status}.` : `Not set up (${ai.ai_status || 'no key'}). Set it up in Settings first.`, !ai.ai_ready));
+
+  // framing, with the facecam drawn on a picture from this video
+  const layout = sel('layout', CHOICES.layout, v.layout);
+  const camPos = sel('cam_pos', CHOICES.cam_pos, v.cam_pos);
+  const splitGame = sel('split_game', CHOICES.split_game, v.split_game);
   const zoom = num('zoom', { min: 30, max: 100 });
-  const song = h('select', { name: 'song' });
-  songSelectOptions(song, v.song || '', true);
+  let camBox = v.cam_pos === 'custom' && v.cam_box ? { ...v.cam_box } : null;
+  const marker = makeMarker((b) => { if (b) { camBox = b; camPos.value = 'custom'; } });
+  if (camBox) marker.set(camBox);
+  let spot = 0, frameShown = false;
+  const showFrame = () => { marker.load(`/api/source-frame?url=${encodeURIComponent(url)}&pos=${FRAME_SPOTS[spot % FRAME_SPOTS.length]}`); frameShown = true; };
+  const another = h('button', { type: 'button', title: 'If the facecam isn\'t visible in this picture' }, 'Show another moment');
+  another.onclick = () => { spot += 1; showFrame(); };
+  const clear = h('button', { type: 'button' }, 'Clear the box');
+  clear.onclick = () => { camBox = null; marker.set(null); if (camPos.value === 'custom') camPos.value = 'auto'; };
+  camPos.addEventListener('change', () => {
+    if (camPos.value === 'custom' && !camBox) toast('Drag a box around the facecam on the picture below.');
+  });
+  const camSection = h('div', { class: 'setup-cam' },
+    h('p', { class: 'hint' }, 'Drag a box around the facecam on this picture from your video, or choose where it is above. The dashed outline is what the top panel will show.'),
+    marker.el,
+    h('div', { class: 'setup-cam-row' },
+      h('div', { class: 'mk-preview' }, h('span', { class: 'hint' }, 'Top panel preview'), marker.preview),
+      h('div', { class: 'actions left' }, another, clear)));
+  const splitBox = h('div', { class: 'grid2' }, fld('Where the facecam is', camPos), fld('Gameplay (bottom half)', splitGame));
+  const zoomBox = fld('Picture height % (black bars / blurred)', zoom);
+  const showFraming = () => {
+    const facecam = ['split', 'auto'].includes(layout.value);
+    splitBox.hidden = camSection.hidden = !facecam;
+    zoomBox.hidden = !['bars', 'blur'].includes(layout.value);
+    if (facecam && !frameShown) showFrame();
+  };
+  layout.addEventListener('change', showFraming);
+
+  // effects and sounds
   const fixed = { ...(v.sfx_fixed || {}) };
   const roleFields = Object.entries(SOUND_ROLE_LABELS).map(([role, label]) => {
     const s = h('select', {});
@@ -343,40 +319,27 @@ function editTemplate(id) {
     s.addEventListener('change', () => { if (s.value) fixed[role] = s.value; else delete fixed[role]; });
     return fld(label, s);
   });
-  let tplBox = v.cam_box || null;
-  if (camPos.value === 'custom' && !tplBox) camPos.value = 'auto';
-  const tplMark = h('button', { type: 'button', title: 'Draw a box around the facecam on a frame from your most recent video' }, 'Mark the facecam…');
-  tplMark.onclick = async () => {
-    const r = await markFacecam('/api/frame/latest', tplBox, false);
-    if (r) { tplBox = r.box; camPos.value = 'custom'; toast('Facecam area marked. Save the template to keep it.'); }
-  };
-  camPos.addEventListener('change', () => { if (camPos.value === 'custom' && !tplBox) tplMark.click(); });
-  const splitBox = h('div', { class: 'grid2' }, h('label', { class: 'field' }, h('span', {}, 'Where the facecam is in the stream'), camPos, tplMark),
-    fld('Gameplay (bottom half)', splitGame));
-  const zoomBox = fld('Picture height % (bars / blurred)', zoom);
-  const showFraming = () => {
-    splitBox.hidden = !['split', 'auto'].includes(layout.value);
-    zoomBox.hidden = !['bars', 'blur'].includes(layout.value);
-  };
-  layout.addEventListener('change', showFraming);
-  const makeDefault = h('input', { type: 'checkbox', checked: !t ? !(state.tpl.templates || []).length : state.tpl.default === id });
+  const song = h('select', { name: 'song' });
+  songSelectOptions(song, v.song || '', true);
 
-  const section = (title, ...kids) => h('fieldset', {}, h('legend', {}, title), ...kids);
-  const form = $('#tpl-form');
+  const form = $('#setup-form');
   form.replaceChildren(
-    fld('Template name', name),
-    section('Framing', fld('Framing', layout), splitBox, zoomBox),
+    section('The video',
+      h('div', { class: 'grid2' }, fld('Type of video', sel('kind', CHOICES.kind, v.kind)),
+        fld('Topic (optional)', h('input', { type: 'text', name: 'topic', placeholder: 'e.g. GTA 6', maxLength: 80, autocomplete: 'off' }))),
+      h('div', { class: 'field' }, h('span', {}, 'How to pick the clips'), scorers)),
+    section('Framing', fld('Framing', layout), splitBox, camSection, zoomBox),
     section('Captions',
-      h('div', { class: 'grid3' }, fld('Style', sel('caption_style', TPL_CHOICES.caption_style, v.caption_style)),
-        fld('Size', sel('caption_size', TPL_CHOICES.caption_size, v.caption_size)),
-        fld('Position', sel('caption_position', TPL_CHOICES.caption_position, v.caption_position))),
-      h('div', { class: 'grid3' }, fld('Highlight colour', sel('highlight', TPL_CHOICES.highlight, v.highlight))),
+      h('div', { class: 'grid3' }, fld('Style', sel('caption_style', CHOICES.caption_style, v.caption_style)),
+        fld('Size', sel('caption_size', CHOICES.caption_size, v.caption_size)),
+        fld('Position', sel('caption_position', CHOICES.caption_position, v.caption_position))),
+      h('div', { class: 'grid3' }, fld('Highlight colour', sel('highlight', CHOICES.highlight, v.highlight))),
       h('div', { class: 'opts' }, box('show_hook', 'Hook text for the first seconds'), box('progress_bar', 'Progress bar'))),
     section('Effects and sounds',
       h('div', { class: 'grid3' },
         fld('Effects style', sel('effects_preset', Object.entries(cat.presets), v.effects_preset)),
         fld('Colour filter', sel('filter', [['', 'Matches the effects style'], ...Object.entries(cat.filters)], v.filter || '')),
-        fld('Sounds to use', sel('sfx_source', TPL_CHOICES.sfx_source, v.sfx_source))),
+        fld('Sounds to use', sel('sfx_source', CHOICES.sfx_source, v.sfx_source))),
       h('div', { class: 'grid3' }, fld('Sound effects volume (0 – 1.5)', num('sfx_volume', { min: 0, max: 1.5, step: 0.05 }))),
       h('details', {}, h('summary', { class: 'hint' }, 'Always use a particular sound for…'), h('div', { class: 'grid3' }, ...roleFields))),
     section('Music',
@@ -384,57 +347,118 @@ function editTemplate(id) {
     section('Timeline',
       h('div', { class: 'opts' }, box('tighten', 'Cut pauses (jump cuts)'), box('cold_open', 'Cold open (teaser first)'),
         box('track_face', 'Follow the face'), box('beat_sync', 'Effects on the song\'s beat'))),
-    section('Finding clips (for new videos made with this template)',
-      h('div', { class: 'grid3' }, fld('Clips per video', num('clip_count', { min: 1, max: 30 })),
-        fld('Shortest (sec)', num('min_len', { min: 5, max: 120 })), fld('Longest (sec)', num('max_len', { min: 10, max: 180 })))),
-    h('label', { class: 'row' }, makeDefault, ' Use this template for every new video'),
-    h('div', { class: 'actions' },
-      t ? h('button', { type: 'button', class: 'danger', onclick: () => deleteTemplate(t) }, 'Delete') : null,
-      t ? h('button', { type: 'button', onclick: () => saveForm(true) }, 'Save as a copy') : null,
-      h('button', { type: 'button', class: 'primary', onclick: () => saveForm(false) }, t ? 'Save changes' : 'Save template')));
+    section('Clips',
+      h('div', { class: 'grid3' }, fld('How many clips', num('clip_count', { min: 1, max: 30 })),
+        fld('Shortest (sec)', num('min_len', { min: 5, max: 120 })), fld('Longest (sec)', num('max_len', { min: 10, max: 180 })))));
   showFraming();
 
-  async function saveForm(copy) {
-    const style = { sfx_fixed: { ...fixed }, cam_box: tplBox };
+  setupCollect = () => {
+    const out = { sfx_fixed: { ...fixed } };
     for (const el of form.querySelectorAll('[name]')) {
-      if (el.name === 'name') continue;
-      style[el.name] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? (el.value === '' ? null : +el.value) : el.value;
+      if (el.type === 'radio') { if (el.checked) out[el.name] = el.value; continue; }
+      out[el.name] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? (el.value === '' ? null : +el.value) : el.value;
     }
-    if (style.filter === '') style.filter = null;
-    if (style.min_len != null && style.max_len != null && style.min_len >= style.max_len) return toast('Shortest must be less than longest', true);
-    const nm = name.value.trim() || 'My template';
+    if (out.filter === '') out.filter = null;
+    if (out.cam_pos === 'custom') {
+      if (!camBox) { toast('Draw a box around the facecam on the picture, or choose where it is.', true); return null; }
+      out.cam_box = camBox;
+    }
+    if (out.min_len != null && out.max_len != null && out.min_len >= out.max_len) { toast('Shortest must be less than longest', true); return null; }
+    return out;
+  };
+}
+
+// ---------- picking the clips with your own chatbot ----------
+// Built once per video and kept while the page refreshes, so a pasted answer isn't wiped.
+const chatPanels = new Map();
+const CHAT_SITES = [['ChatGPT', 'https://chatgpt.com/'], ['Claude', 'https://claude.ai/new'], ['Gemini', 'https://gemini.google.com/app']];
+
+function chatPanel(job) {
+  if (chatPanels.has(job.id)) return chatPanels.get(job.id);
+  const info = h('span', { class: 'hint' }, 'Loading…');
+  const modeQuick = h('input', { type: 'radio', name: 'chat-mode-' + job.id, checked: true });
+  const modeFull = h('input', { type: 'radio', name: 'chat-mode-' + job.id });
+  const fullLabel = h('span', {}, 'The whole transcript');
+  const copyRow = h('div', { class: 'chat-copy' });
+  const manual = h('textarea', { rows: 4, readOnly: true, hidden: true, class: 'chat-manual' });
+  const answer = h('textarea', { rows: 6, placeholder: 'Paste the chatbot\'s whole answer here: its list of clips (titles with start and end times, a table, or the JSON). If it asked questions instead, tell it "Don\'t ask questions, list the clips now" and paste its new answer.', spellcheck: false });
+  const addBtn = h('button', { class: 'primary' }, 'Add these moments');
+  const tally = h('span', { class: 'hint' });
+  const makeBtn = h('button', { class: 'primary', disabled: true }, 'Make the clips');
+  const skipBtn = h('button', {}, 'Skip: use Clipper\'s own picks');
+  let data = null;
+
+  async function copyPrompt(mode, part, btn) {
+    btn.disabled = true;
     try {
-      const r = await api('/api/templates', { body: { id: copy ? undefined : (t && t.id), name: copy ? nm + ' (copy)' : nm, style, make_default: makeDefault.checked } });
-      if (!makeDefault.checked && t && state.tpl.default === t.id && !copy) await api('/api/templates/default', { body: { id: '' } });
-      await loadTemplates();
-      toast(`Template "${r.saved.name}" saved` + (makeDefault.checked ? '. New videos will use it.' : ''));
-      editTemplate(r.saved.id);
+      const r = await api(`/api/jobs/${job.id}/chat/prompt?mode=${mode}&part=${part}`);
+      try { await navigator.clipboard.writeText(r.text); manual.hidden = true; }
+      catch { manual.value = r.text; manual.hidden = false; manual.select(); }   // copy it by hand instead
+      btn.textContent = btn.textContent.replace(/^(✓ )?/, '✓ ');
+      toast(manual.hidden ? 'Prompt copied. Paste it into your chatbot, then paste its answer below.' : 'Select all of the text below and copy it.');
     } catch (err) { toast(err.message, true); }
+    btn.disabled = false;
   }
-}
+  function drawCopy() {
+    if (!data) return;
+    const full = modeFull.checked || data.short;
+    copyRow.replaceChildren(...(full && data.parts > 1
+      ? Array.from({ length: data.parts }, (_, i) => { const b = h('button', {}, `Copy part ${i + 1} of ${data.parts}`); b.onclick = () => copyPrompt('full', i + 1, b); return b; })
+      : [(() => { const b = h('button', { class: 'primary' }, 'Copy the prompt'); b.onclick = () => copyPrompt(full ? 'full' : 'flagged', 1, b); return b; })()]));
+  }
+  function drawTally() {
+    if (!data) return;
+    tally.textContent = data.found ? `${data.found} moment${data.found === 1 ? '' : 's'} added so far (Clipper makes the best ${data.want}).` : 'No moments added yet.';
+    makeBtn.disabled = !data.found;
+  }
+  modeQuick.onchange = modeFull.onchange = drawCopy;
+  addBtn.onclick = async () => {
+    if (!answer.value.trim()) return toast('Paste the chatbot\'s answer first', true);
+    addBtn.disabled = true;
+    try {
+      const r = await api(`/api/jobs/${job.id}/chat/answer`, { body: { text: answer.value } });
+      data.found = r.total; drawTally(); answer.value = '';
+      toast(`Added ${r.added} moment${r.added === 1 ? '' : 's'}` + (r.skipped ? ` (${r.skipped} overlapped ones already added)` : '') +
+        (data.parts > 1 && modeFull.checked ? '. Paste the next part\'s answer, or make the clips.' : '. Press "Make the clips".'));
+    } catch (err) { toast(err.message, true); }
+    addBtn.disabled = false;
+  };
+  const finish = async (builtin) => {
+    makeBtn.disabled = skipBtn.disabled = true;
+    try {
+      const r = await api(`/api/jobs/${job.id}/chat/finish`, { body: { builtin } });
+      chatPanels.delete(job.id);
+      toast(`${r.clips} clips made. The best ones are rendering now.`);
+      poll(); refreshJobs();
+    } catch (err) { toast(err.message, true); makeBtn.disabled = !(data && data.found); skipBtn.disabled = false; }
+  };
+  makeBtn.onclick = () => finish(false);
+  skipBtn.onclick = () => { if (confirm('Skip the chatbot and make the clips from Clipper\'s own picks?')) finish(true); };
 
-async function deleteTemplate(t) {
-  if (!confirm(`Delete the template "${t.name}"? Videos already made with it keep their look.`)) return;
-  try {
-    await api('/api/templates/' + t.id, { method: 'DELETE' });
-    await loadTemplates();
-    const list = state.tpl.templates || [];
-    editTemplate(list[0] ? list[0].id : '');
-  } catch (err) { toast(err.message, true); }
+  const el = h('div', { class: 'progress-card chat-card' },
+    h('b', {}, 'Pick the clips with your chatbot'), info,
+    h('div', { class: 'chat-step' }, h('span', { class: 'chat-num' }, '1'), h('div', {},
+      h('div', {}, 'Copy the prompt and paste it into a chatbot: ',
+        ...CHAT_SITES.flatMap(([n, u], i) => [i ? ', ' : '', h('a', { href: u, target: '_blank' }, n)]), ' or any other.'),
+      h('div', { class: 'chat-modes' },
+        h('label', { class: 'row small' }, modeQuick, h('span', {}, 'Quick: only the stretches Clipper flagged as promising (one prompt)')),
+        h('label', { class: 'row small' }, modeFull, fullLabel)),
+      copyRow, manual)),
+    h('div', { class: 'chat-step' }, h('span', { class: 'chat-num' }, '2'), h('div', {},
+      h('div', {}, 'Paste the chatbot\'s answer here. With several parts, paste each answer and press "Add" every time.'),
+      answer, h('div', { class: 'actions left' }, addBtn, tally))),
+    h('div', { class: 'chat-step' }, h('span', { class: 'chat-num' }, '3'), h('div', {},
+      h('div', { class: 'actions left' }, makeBtn, skipBtn))));
+  chatPanels.set(job.id, el);
+  api(`/api/jobs/${job.id}/chat`).then((d) => {
+    data = d;
+    info.textContent = 'The video is transcribed. Nothing is cut until you finish these steps.';
+    fullLabel.textContent = d.parts > 1 ? `The whole transcript (${d.parts} prompts, one after another; more thorough)` : 'The whole transcript (one prompt)';
+    if (d.short) { modeQuick.closest('.chat-modes').hidden = true; }
+    drawCopy(); drawTally();
+  }).catch((err) => { info.textContent = err.message; });
+  return el;
 }
-
-$('#open-templates').onclick = async () => { await loadTemplates(); openTemplates(); };
-$('#tpl-new').onclick = () => editTemplate('');
-$('#tpl-close').onclick = () => $('#templates').close();
-$('#templates').addEventListener('close', async () => {
-  if (!pickResolve) return;
-  // the "which template?" question was waiting: bring it back, on the template just made or edited
-  await loadTemplates();
-  if ((state.tpl.templates || []).some((t) => t.id === tplEditing)) pickChoice = tplEditing;
-  drawPicks();
-  $('#pick-template').showModal();
-});
-$('#settings-templates').onclick = async () => { await loadTemplates(); openTemplates(); };
 
 // ---------- job view ----------
 let pollTimer;
@@ -463,19 +487,14 @@ function renderJob(job) {
           h('button', { onclick: () => batch('render-all', {}, 'full-quality render'), title: 'Render every clip in full quality with its current settings' }, 'Render all'),
           h('button', { onclick: exportAll, title: 'Copy every full-quality clip to the exports folder with its description' }, 'Export all'),
           h('button', { onclick: scheduleAll, title: 'Upload every rendered clip to YouTube, one per free daily slot, best score first' }, 'Schedule all to YouTube'),
-          h('span', { class: 'tpl-apply' }, h('select', { id: 'job-template', title: 'Give every clip in this video a saved template\'s look' }),
-            h('button', { onclick: applyTemplateToJob }, 'Apply')),
           h('button', { class: 'danger', onclick: removeJob }, 'Delete'))),
       h('div', { id: 'j-status' }),
       h('div', { id: 'j-clips', class: 'clips' }));
-    fillTemplateSelect($('#job-template'), '', 'Apply a template…');
   }
   $('#j-title').textContent = job.title || job.url;
   const kinds = { irl: 'IRL', gaming: 'Gaming', film: 'Film / TV reaction', podcast: 'Podcast' };
   const from = job.platform && job.platform !== 'local file' ? `${job.streamer} on ${job.platform}` : job.platform || job.streamer;
   const bits = [from, [kinds[job.kind], job.topic].filter(Boolean).join(': '), job.duration ? fmtTime(job.duration) + ' long' : null];
-  const tplName = job.template && ((state.tpl && state.tpl.templates) || []).find((t) => t.id === job.template)?.name;
-  if (tplName) bits.push(`template: ${tplName}`);
   if (job.status === 'ready') {
     if (job.ai) {
       const used = job.ai.cost_usd != null ? `about $${job.ai.cost_usd.toFixed(2)}`
@@ -514,6 +533,7 @@ function renderJob(job) {
       rec ? h('div', { class: 'hint' }, 'Clipper records the stream in 2-minute pieces and checks each one for moments as it finishes, so the first clips appear a few minutes in. Only moments scoring at least ' +
         (state.settings.live_min_score || 60) + ' become clips (change it in Settings). Keep Clipper open while it records.') : null));
   }
+  if (job.status === 'waiting_chat') parts.push(chatPanel(job));
   if (job.status === 'error') parts.push(h('div', { class: 'notice bad' }, 'This video could not be processed. ', job.error || '', ' ',
     h('button', { class: 'link', onclick: openLogs }, 'Open the log folder')));
   for (const w of job.warnings || []) parts.push(h('div', { class: 'notice' }, w));
@@ -621,7 +641,7 @@ function buildCard(job, clip) {
   const zoom = h('input', { type: 'range', min: 30, max: 100, step: 1, value: clip.zoom || 73 });
   const zoomLabel = h('span', {});
   const zoomField = h('label', { class: 'field' }, zoomLabel, zoom);
-  const camPos = h('select', {}, ...TPL_CHOICES.cam_pos.map(([k, l]) => h('option', { value: k }, l)));
+  const camPos = h('select', {}, ...CHOICES.cam_pos.map(([k, l]) => h('option', { value: k }, l)));
   const splitGame = h('select', {},
     h('option', { value: 'fill' }, 'Fill the panel (crops the sides)'), h('option', { value: 'fit' }, 'Show the whole game (blurred edges)'));
   let camBox = clip.cam_box || null;       // the area marked by hand, as shares of the frame
@@ -667,8 +687,8 @@ function buildCard(job, clip) {
   const showCaptionFields = () => { memeField.hidden = caps.value !== 'meme'; hookField.hidden = caps.value === 'meme'; };
   caps.addEventListener('change', showCaptionFields);
   const colour = h('select', {}, ...['yellow', 'green', 'cyan', 'pink', 'orange', 'white'].map((c) => h('option', {}, c)));
-  const capSize = h('select', {}, ...TPL_CHOICES.caption_size.map(([k, l]) => h('option', { value: k }, l)));
-  const capPos = h('select', {}, ...TPL_CHOICES.caption_position.map(([k, l]) => h('option', { value: k }, l)));
+  const capSize = h('select', {}, ...CHOICES.caption_size.map(([k, l]) => h('option', { value: k }, l)));
+  const capPos = h('select', {}, ...CHOICES.caption_position.map(([k, l]) => h('option', { value: k }, l)));
   const showHook = h('input', { type: 'checkbox', checked: clip.show_hook !== false });
   capSize.value = clip.caption_size || 'medium'; capPos.value = clip.caption_position || 'auto';
   const song = h('select', {});
@@ -745,11 +765,6 @@ function buildCard(job, clip) {
     caption_size: capSize.value, caption_position: capPos.value, show_hook: showHook.checked,
     ...fx.value(),
   });
-  // The look only (no text, cut or effect times), for a template.
-  const STYLE = (state.tpl && state.tpl.keys) || [];
-  const styleNow = () => { const b = settingsBody(); return Object.fromEntries(STYLE.filter((k) => k in b).map((k) => [k, b[k]])); };
-  const tplBtn = h('button', { title: 'Save this clip\'s look (framing, facecam corner, captions, effects style, sounds, song, filter, timeline options) as a template, so new videos are made with it',
-    onclick: () => saveTemplate(styleNow()) }, 'Save as template');
   async function doRender(preview) {
     try {
       await api(`/api/jobs/${job.id}/clips/${clip.id}/render`, { body: { ...settingsBody(), preview } });
@@ -815,7 +830,7 @@ function buildCard(job, clip) {
             h('button', { onclick: nudge('end', 1), title: 'End 1s later' }, 'end ▶'))),
         h('div', { class: 'opts' }, tighten.el, coldOpen.el, trackFace.el, beatSync.el),
         fx.el),
-      h('div', { class: 'actions' }, tplBtn, styleBtn, previewBtn, renderBtn, exportBtn),
+      h('div', { class: 'actions' }, styleBtn, previewBtn, renderBtn, exportBtn),
       h('div', { class: 'yt' }, h('span', { class: 'hint' }, 'YouTube'), h('div', { class: 'yt-row' }, ytButtons), ytStatus,
         h('div', { class: 'yt-row' }, h('span', { class: 'hint' }, 'Other apps:'),
           ...shareButtons))));
@@ -1075,19 +1090,10 @@ $('#open-music-folder').onclick = () => api('/api/open-folder', { body: { which:
 $('#open-sfx-folder').onclick = () => api('/api/open-folder', { body: { which: 'sfx' } });
 
 // ---------- settings ----------
-const FIELDS = ['clip_count', 'min_len', 'max_len', 'default_layout', 'default_zoom', 'caption_style', 'custom_base_url',
-  'highlight', 'max_height', 'progress_bar', 'whisper_model', 'language', 'audd_api_key', 'jamendo_client_id',
-  'schedule_times', 'youtube_privacy', 'effects_preset', 'sfx_volume', 'channel_name', 'channel_handle', 'channel_avatar', 'tighten', 'cold_open', 'live_min_score', 'live_auto_render',
-  'sfx_source', 'default_song', 'default_template', 'encoder', 'parallel_renders'];
-
-function describeStyle(s) {
-  const framing = { bars: 'black bars', blur: 'blurred background', auto: 'auto framing', crop: 'full-screen crop', split: 'facecam + gameplay', story: 'story card' };
-  const corner = { tl: 'top-left', tr: 'top-right', ml: 'middle-left', mr: 'middle-right', bl: 'bottom-left', br: 'bottom-right', custom: 'marked by hand' };
-  const song = !s.song ? 'no song' : s.song.startsWith('auto:') ? 'auto song' : 'song: ' + s.song.split('/').pop().replace(/\.\w+$/, '');
-  return [framing[s.layout] || s.layout, s.layout === 'split' && corner[s.cam_pos] ? `facecam ${corner[s.cam_pos]}` : '',
-    s.caption_style && s.caption_style + ' captions', s.effects_preset && s.effects_preset + ' effects',
-    s.sfx_source === 'builtin' ? 'built-in sounds' : 'my sounds', song].filter(Boolean).join(' · ');
-}
+// Only what is set once lives here; everything about how a video's clips are made is asked in the setup window.
+const FIELDS = ['custom_base_url', 'max_height', 'whisper_model', 'language', 'audd_api_key', 'jamendo_client_id',
+  'schedule_times', 'youtube_privacy', 'channel_name', 'channel_handle', 'channel_avatar', 'live_min_score', 'live_auto_render',
+  'encoder', 'parallel_renders'];
 
 // Connected AI: one key and model per provider. Typed values are kept per provider while switching,
 // so trying a different provider doesn't wipe what was entered for the first.
@@ -1099,7 +1105,6 @@ const AI_NOTES = {
   custom: 'Any service that offers the OpenAI Chat Completions API. Paste its base URL above.',
 };
 let drafts = {};
-const aiScorer = () => document.querySelector('input[name=scorer]:checked')?.value || 'builtin';
 
 function stashDraft() {
   const p = $('#ai-provider').dataset.current;
@@ -1121,14 +1126,11 @@ function showProvider(p) {
   $('#ai-note').textContent = AI_NOTES[p] || 'Cost depends on the model you pick; see the provider\'s pricing page.';
 }
 
-function showScorer() {
-  $('#ai-box').hidden = aiScorer() !== 'ai';
+function showAiState() {
   const s = state.settings;
-  $('#ai-state').textContent = aiScorer() === 'builtin' ? 'Using the built-in algorithm.'
-    : s.ai_ready ? `Currently saved: ${s.ai_status}.` : `Not ready yet: ${s.ai_status}. Until it's set up, the built-in algorithm is used.`;
+  $('#ai-state').textContent = s.ai_ready ? `Ready: ${s.ai_status}.` : `Not ready yet: ${s.ai_status}.`;
 }
 
-for (const r of document.querySelectorAll('input[name=scorer]')) r.onchange = showScorer;
 $('#ai-provider').onchange = () => { stashDraft(); showProvider($('#ai-provider').value); };
 $('#ai-load').onclick = async () => {
   const p = $('#ai-provider').value;
@@ -1174,8 +1176,6 @@ $('#yt-disconnect').onclick = async () => showYouTube(await api('/api/youtube/di
 
 function fillSettings(s) {
   state.settings = s;
-  songSelectOptions($('#s-default_song'), s.default_song, true);
-  fillTemplateSelect($('#s-default_template'), s.default_template, 'None (use the settings above)');
   for (const f of FIELDS) {
     const el = $('#s-' + f);
     if (el.type === 'checkbox') el.checked = !!s[f];
@@ -1191,14 +1191,11 @@ function fillSettings(s) {
   drafts = {};
   $('#ai-provider').replaceChildren(...Object.entries(s.providers).map(([id, p]) => h('option', { value: id }, p.label)));
   $('#ai-provider').value = s.ai_provider;
-  document.querySelector(`input[name=scorer][value=${s.scorer}]`).checked = true;
   showProvider(s.ai_provider);
-  showScorer();
+  showAiState();
 }
 
 $('#open-settings').onclick = async () => {
-  await loadTemplates();
-  try { state.tracks = (await api('/api/music')).tracks; } catch {}
   fillSettings(await api('/api/settings'));
   showYouTube(await api('/api/youtube'));
   $('#settings').showModal();
@@ -1212,12 +1209,10 @@ $('#settings-save').onclick = async () => {
   }
   patch.max_height = +patch.max_height;
   patch.parallel_renders = +patch.parallel_renders;
-  if (patch.min_len >= patch.max_len) return toast('Shortest must be less than longest', true);
   stashDraft();
   const chosen = $('#ai-provider').value;
-  patch.scorer = aiScorer();
   patch.ai_provider = chosen;
-  if (patch.scorer === 'ai' && !(drafts[chosen] || {}).model) return toast('Pick a model for the connected AI first (Load models, then choose one).', true);
+  if ((drafts[chosen] || {}).key && !(drafts[chosen] || {}).model) return toast('Pick a model for the connected AI too (Load models, then choose one).', true);
   try {
     // Keys and models typed for other providers are saved too, then the chosen provider and the rest.
     for (const [p, d] of Object.entries(drafts)) {
@@ -1225,10 +1220,9 @@ $('#settings-save').onclick = async () => {
     }
     const mine = drafts[chosen] || {};
     const s = await api('/api/settings', { body: { ...patch, ai_key: mine.key, ai_model: mine.model } });
-    await loadTemplates();
     fillSettings(s);
     $('#settings').close();
-    toast(s.scorer === 'ai' && !s.ai_ready ? `Saved, but the connected AI isn't ready: ${s.ai_status}.` : 'Settings saved', s.scorer === 'ai' && !s.ai_ready);
+    toast('Settings saved');
   } catch (err) { toast(err.message, true); }
 };
 
@@ -1313,7 +1307,7 @@ $('#results-close').onclick = () => $('#results').close();
 (async () => {
   try { state.tracks = (await api('/api/music')).tracks; } catch {}
   try { state.settings = await api('/api/settings'); } catch {}
-  await loadTemplates();
+  await loadSetupInfo();
   await loadEffects();
   await refreshJobs();
 })();

@@ -39,7 +39,8 @@ DEFAULTS = {
     "sfx_volume": 0.7,
     "sfx_source": "auto",            # sounds for automatic effects: auto (yours when you have some), mine, builtin
     "default_song": "",              # song for new clips: "", a track id, "auto:mood" or "auto:rotate"
-    "default_template": "",          # template every new video is made with ("" = the defaults above)
+    "default_template": "",          # (older versions) template for new videos; the setup window replaced it
+    "last_setup": {},                # the choices made in the setup window for the last video, offered next time
     "encoder": "auto",               # video encoder: auto, nvenc, amf, qsv, mf (any GPU) or cpu
     "parallel_renders": 2,           # clips rendered at the same time (2 finishes a batch about a third sooner)
     "tighten": True,                 # cut silent pauses out of new clips (jump cuts)
@@ -91,7 +92,9 @@ def save_settings(patch: dict) -> dict:
             if k not in DEFAULTS or v is None:
                 continue
             d = DEFAULTS[k]
-            if isinstance(d, dict):
+            if k == "last_setup":
+                s[k] = dict(v)               # replaced whole, so choices turned off don't linger
+            elif isinstance(d, dict):
                 s[k] = {**s.get(k, {}), **{a: b for a, b in dict(v).items() if b is not None}}
             elif isinstance(d, bool):
                 s[k] = bool(v)

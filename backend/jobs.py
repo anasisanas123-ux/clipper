@@ -33,6 +33,8 @@ def _dir(job_id):
 def _save(job):
     # Clips of one video render at the same time, so another thread may change the job while it is being
     # written out: retry the snapshot, and replace the file in one step so a reader never sees half of it.
+    if job.get("status") == "deleted":
+        return                   # its folder is gone; don't bring it back
     with _lock:
         for attempt in range(5):
             try:
@@ -101,21 +103,35 @@ def get(job_id):
     return _jobs.get(job_id)
 
 
-def create(url: str, kind: str = "irl", topic: str = "", template=None) -> dict:
-    """template: a template id, "" for the plain Settings defaults, or None for the default template."""
-    if template is None:
-        template = config.load_settings().get("default_template") or ""
+def create(url: str, setup: dict = None) -> dict:
+    """A new video, made with the choices from the setup window (remembered for the next video)."""
+    setup = templates.clean_setup(setup or {})
+    config.save_settings({"last_setup": {k: v for k, v in setup.items() if k != "topic"}})
     job = {"id": uuid.uuid4().hex[:10], "url": url.strip(),
-           "kind": kind if kind in KINDS else "irl", "topic": topic.strip()[:80], "title": "", "streamer": "", "duration": None,
+           "kind": setup["kind"], "topic": setup["topic"], "title": "", "streamer": "", "duration": None,
            "status": "analyzing", "stage": "Queued", "progress": 0.0, "created": time.time(),
-           "error": None, "warnings": [], "ai": None, "engine": None, "clips": [],
-           "template": template if templates.get(template) else ""}
+           "error": None, "warnings": [], "ai": None, "engine": None, "clips": [], "setup": setup}
+    if setup.get("cam_pos") == "custom":
+        job["cam_box"] = setup["cam_box"]      # the facecam drawn on this video: used for every clip
     _dir(job["id"]).mkdir(parents=True)
     with _lock:
         _jobs[job["id"]] = job
     _save(job)
     _tasks.put(("analyze", job["id"], None))
     return job
+
+
+class Cancelled(Exception):
+    """The video was deleted while it was being worked on."""
+
+
+def queue_note(job_id) -> str:
+    """What a queued video is waiting for (videos are analysed one at a time)."""
+    pending = [t[1] for t in list(_tasks.queue) if t[0] == "analyze"]
+    ahead = (pending.index(job_id) if job_id in pending else 0) + (1 if _running.get("analyze") else 0)
+    if not ahead:
+        return "Starting…"
+    return f"Waiting for {ahead} video{'s' if ahead > 1 else ''} ahead to finish analysing (videos are analysed one at a time)"
 
 
 def delete(job_id):
@@ -130,7 +146,9 @@ def delete(job_id):
 
 
 def queue_render(job_id, clip_id, patch=None, preview=False):
-    job = _jobs[job_id]
+    job = _jobs.get(job_id)
+    if not job:
+        return None              # deleted meanwhile
     clip = next(c for c in job["clips"] if c["id"] == clip_id)
     with _lock:
         old_start = clip["start"]
@@ -153,6 +171,8 @@ def queue_render(job_id, clip_id, patch=None, preview=False):
 
 
 def _stage(job, text, progress=0.0):
+    if job.get("status") == "deleted":
+        raise Cancelled()
     if text != job.get("stage"):
         log.info("[%s] %s", job["id"], text)
     job["stage"], job["progress"] = text, round(float(progress), 3)
@@ -165,6 +185,8 @@ def _status(job):
     last = [0.0, ""]
 
     def cb(text, p):
+        if job.get("status") == "deleted":
+            raise Cancelled()
         head = text.split(":")[0].split("(")[0]
         if head != last[1]:
             last[1] = head
@@ -178,7 +200,7 @@ def _status(job):
 
 def _analyze(job):
     # the video's template can set how many clips to find and how long they are
-    settings = templates.find_settings(config.load_settings(), job.get("template", ""))
+    settings = templates.job_settings(config.load_settings(), job)
     d = _dir(job["id"])
     status = _status(job)
     _stage(job, "Reading video info")
@@ -216,11 +238,24 @@ def _analyze(job):
     n = int(settings["clip_count"])
     _stage(job, "Finding the best moments")
     short = duration <= settings["max_len"] + 10
+    if settings.get("scorer") == "chat":
+        # You run the AI step in your own chatbot: keep the built-in picks as a fallback and wait for its answer.
+        local = ([moments.whole_clip(z, segments, duration, job["kind"])] if short else
+                 moments.find_candidates(z, segments, settings, limit=max(16, n * 3), kind=job["kind"]))
+        job["chat"] = {"local": local, "found": [], "pasted": 0, "n": n, "short": short}
+        job["status"] = "waiting_chat"
+        _stage(job, "Waiting for your chatbot's answer", 1.0)
+        log.info("[%s] transcript ready; waiting for a chatbot answer", job["id"])
+        return
     found, job["ai"], notes = engine.find(job, segments, z, settings, n, short, lambda text: _stage(job, text))
     job["warnings"] += notes
+    _make_clips(job, found, settings, n)
+
+
+def _make_clips(job, found, settings, n):
+    """Turns the chosen moments into clips (set up with the video's template) and starts rendering the best."""
     if not found:
         raise RuntimeError("No usable moments found (the video may be silent or too short).")
-
     for i, m in enumerate(found[: max(n * 2, n + 3)]):
         init_clip(job, m, f"c{i + 1}", settings)
         job["clips"].append(m)
@@ -231,9 +266,111 @@ def _analyze(job):
         queue_render(job["id"], c["id"])
 
 
+# ---------------------------------------------------------------- your own chatbot (copy and paste)
+def _chat_data(job):
+    """Settings, transcript and loudness for a video waiting on a chatbot answer."""
+    if job.get("status") != "waiting_chat" or not job.get("chat"):
+        raise ValueError("This video isn't waiting for a chatbot answer.")
+    settings = templates.job_settings(config.load_settings(), job)
+    return settings, moments_segments(job), _excitement(job)
+
+
+def _flagged(job, segments, chars=ai.PART_CHARS):
+    """The built-in engine's candidate stretches, widened for context and merged where they touch. The most
+    promising come first and stop when the prompt would no longer fit in one chat message."""
+    spans, size = [], 0
+    for c in sorted(job["chat"]["local"], key=lambda c: -c["score"]):
+        a, b = max(0.0, c["start"] - 45), c["end"] + 45
+        add = sum(len(s["text"]) + 12 for s in segments if s["end"] > a and s["start"] < b
+                  and not any(s["end"] > x and s["start"] < y for x, y in spans))
+        if spans and size + add > chars:
+            break
+        spans.append((a, b))
+        size += add
+    spans.sort()
+    merged = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _chat_parts(segments, chars=ai.PART_CHARS):
+    """The whole transcript cut into (start, end) slices that each fit in one chat message."""
+    parts, a, size = [], 0.0, 0
+    for s in segments:
+        line = len(s["text"]) + 12
+        if size and size + line > chars:
+            parts.append((a, s["start"]))
+            a, size = s["start"], 0
+        size += line
+    parts.append((a, float(segments[-1]["end"]) + 1 if segments else 1.0))
+    return parts
+
+
+def chat_info(job_id) -> dict:
+    job = _jobs[job_id]
+    settings, segments, z = _chat_data(job)
+    chat = job["chat"]
+    return {"parts": len(_chat_parts(segments)), "flagged": len(_flagged(job, segments)), "found": len(chat["found"]),
+            "pasted": chat.get("pasted", 0), "want": chat["n"], "short": chat.get("short", False)}
+
+
+def chat_prompt(job_id, mode="flagged", part=1) -> str:
+    job = _jobs[job_id]
+    settings, segments, z = _chat_data(job)
+    n = job["chat"]["n"]
+    if mode == "flagged" and not job["chat"].get("short"):
+        return ai.chat_prompt(job, segments, z, settings, n + 3, flagged=_flagged(job, segments))
+    parts = _chat_parts(segments)
+    part = max(1, min(len(parts), int(part)))
+    a, b = parts[part - 1]
+    total = segments[-1]["end"] if segments else 1
+    # a fair share of the clips for this slice, with some spare so the best can be chosen afterwards
+    want = n + 3 if len(parts) == 1 else max(2, int(np.ceil((n + 3) * (b - a) / max(1.0, total))) + 1)
+    return ai.chat_prompt(job, segments, z, settings, want, part=(part, len(parts), a, b))
+
+
+def chat_answer(job_id, text: str) -> dict:
+    """Adds the moments from a pasted chatbot answer. Moments overlapping one already added are skipped."""
+    job = _jobs[job_id]
+    settings, segments, z = _chat_data(job)
+    got = ai.parse_chat_answer(text or "", segments, job, settings, float(job.get("duration") or len(z)))
+    found = job["chat"]["found"]
+    added = 0
+    for m in got:
+        if all(engine._overlap(m, o) < 0.5 for o in found):
+            found.append(m)
+            added += 1
+    job["chat"]["pasted"] = job["chat"].get("pasted", 0) + 1
+    _save(job)
+    return {"added": added, "skipped": len(got) - added, "total": len(found)}
+
+
+def chat_finish(job_id, builtin=False) -> int:
+    """Makes the clips: from the chatbot's moments (scored together with the built-in engine), or from the
+    built-in picks when you'd rather skip the chatbot."""
+    job = _jobs[job_id]
+    settings, segments, z = _chat_data(job)
+    chat = job["chat"]
+    local = chat["local"]
+    if builtin or not chat["found"]:
+        clips = engine.fuse(local, local, z, segments, settings, job["kind"])
+        engine.fix_titles(clips, job, settings, False)
+    else:
+        clips = engine.fuse(chat["found"], local, z, segments, settings, job["kind"], "your chatbot")
+        engine.fix_titles(clips, job, settings, False)
+        job["ai"] = {"provider": "Your chatbot", "model": "pasted answer"}
+    job.pop("chat", None)
+    _make_clips(job, clips, settings, chat["n"])
+    return len(job["clips"])
+
+
 def init_clip(job, m, cid, settings):
     """Fills in a newly found moment's editing settings from the video's template (or the Settings defaults)."""
-    style = templates.style_for(settings, job.get("template", ""))
+    style = templates.job_style(settings, job)
     _apply_look(m, style, int(cid.lstrip("c") or 1) - 1)
     m.update(id=cid, status="idle", error=None, version=0, layout_info=None,
              copyright=None, src_start=m.get("src_start"), src_end=m.get("src_end"), youtube=None,
@@ -495,6 +632,50 @@ def frame_jpeg(job, clip_id=None) -> bytes:
         out.unlink(missing_ok=True)
 
 
+_frame_sources: dict = {}    # link -> (fetched at, stream source, duration, is live): the links expire
+
+
+def source_frame(url: str, pos: float = 0.35) -> bytes:
+    """A frame (JPEG, 960 wide) at `pos` (share of the length) of a link or file that hasn't been added yet, so
+    the facecam can be drawn in the setup window before any work starts. Live streams give the current frame."""
+    pos = min(0.95, max(0.02, float(pos)))
+    max_h = int(config.load_settings()["max_height"])
+    if sources.is_local(url):
+        src, dur, live = {"url": url, "audio_url": None, "headers": {}}, sources.probe_local(url)["duration"], False
+    else:
+        cached = _frame_sources.get(url)
+        if cached and time.time() - cached[0] < 600:
+            _, src, dur, live = cached
+        else:
+            info = sources.probe(url)
+            live = bool(info.get("is_live"))
+            src = sources.live_source(url, max_h) if live else sources.hires_source(url, max_h)
+            if not src:
+                raise RuntimeError("The stream isn't live any more.")
+            dur = info.get("duration") or 0
+            _frame_sources[url] = (time.time(), src, dur, live)
+    out = config.JOBS / f"_frame_{uuid.uuid4().hex[:6]}.jpg"
+    piece = config.JOBS / f"_frame_{uuid.uuid4().hex[:6]}.mp4"
+    http = sources.http_args(src.get("headers") or {}) if not sources.is_local(src["url"]) else []
+    at = dur * pos if dur and not live else 0.0
+    grab = lambda inp, extra: config.run_ffmpeg([*extra, "-i", inp, "-frames:v", "1", "-vf", "scale=960:-2",
+                                                 "-q:v", "3", str(out)], timeout=90)
+    try:
+        try:
+            grab(src["url"], [*http, *(["-ss", f"{at:.2f}"] if at else [])])
+        except Exception:
+            _frame_sources.pop(url, None)     # the stream link may have expired: fetch a new one next time
+            if sources.is_local(url) or live:
+                raise
+            # YouTube sometimes refuses direct requests (403): fetch just two seconds there and use those
+            sources.download_section(url, at, at + 2, piece, 720)
+            grab(str(piece), [])
+        return out.read_bytes()
+    finally:
+        out.unlink(missing_ok=True)
+        piece.unlink(missing_ok=True)
+
+
 def set_cam(job_id, box: dict, clip_id=None, everywhere=True) -> int:
     """Uses a facecam area marked by hand (shares of the frame) on one clip or every clip in the video, and
     re-renders the ones already rendered with the facecam framing. Returns how many were queued."""
@@ -526,29 +707,6 @@ def _apply_look(clip, style, index=0):
         if k in style:
             clip[k] = json.loads(json.dumps(style[k]))
     clip["song"] = music.pick(style.get("song") or "", clip.get("mood", ""), index)
-
-
-def apply_template(job_id, template_id) -> int:
-    """Gives every clip in the video a template's look and re-renders the ones already rendered or queued."""
-    job = _jobs[job_id]
-    t = templates.get(template_id)
-    if not t:
-        raise ValueError("That template no longer exists")
-    style = templates.style_for(config.load_settings(), template_id)
-    count = 0
-    with _lock:
-        job["template"] = template_id
-    for i, c in enumerate(job["clips"]):
-        if c["status"] in ("queued", "rendering"):
-            continue
-        with _lock:
-            _apply_look(c, style, i)
-            c["effects"] = None          # placed again on this clip's own moments, with the template's sounds
-        if c.get("version", 0) > 0 or c.get("preview_version", 0) > 0 or c["status"] == "error":
-            queue_render(job_id, c["id"])
-            count += 1
-    _save(job)
-    return count
 
 
 def _clip_context(job, clip, start=None, end=None, tighten=None, cold_open=None, song=None):
@@ -790,18 +948,28 @@ def _render_worker():
                 _render_gate.notify_all()
 
 
+_running: dict = {}      # what the analysis worker is doing right now: {"analyze": job id}
+
+
 def _worker():
     while True:
+        _running.clear()
         kind, job_id, clip_id = _tasks.get()
         job = _jobs.get(job_id)
         if not job:
             continue
+        _running[kind] = job_id
         try:
             if kind == "analyze":
                 _analyze(job)
             elif kind == "upload":
                 _upload(job, next(c for c in job["clips"] if c["id"] == clip_id))
+        except Cancelled:
+            log.info("[%s] stopped: the video was deleted", job_id)
         except Exception as e:
+            if job["status"] == "deleted":
+                log.info("[%s] stopped: the video was deleted", job_id)
+                continue
             log.exception("Task failed")
             log.error("[%s] %s failed: %s", job_id, kind, e)
             if job["status"] != "deleted":

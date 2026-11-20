@@ -247,7 +247,9 @@ def _find(s, final=False):
     job, lv, d = s.job, s.job["live"], _d(s.job)
     if not lv["pieces"]:
         return
-    settings = jobs.templates.find_settings(config.load_settings(), job.get("template", ""))
+    settings = jobs.templates.job_settings(config.load_settings(), job)
+    if settings.get("scorer") == "chat":
+        settings["scorer"] = "builtin"      # a live stream can't wait for a pasted answer
     end = lv["recorded"]
     w0 = max(0.0, end - CHUNK - LOOKBACK)
     z_all = np.load(d / "excitement.npy")

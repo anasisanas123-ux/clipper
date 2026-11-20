@@ -168,22 +168,8 @@ body.dropping::after { content: "Drop the video to add it"; position: fixed; ins
 .live-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .live-row button { margin-left: auto; }
 .job-sub .live-dot { font-size: 11px; }
-.tpl-apply { display: inline-flex; gap: 4px; }
-.tpl-apply select { max-width: 170px; }
-.actions .link.tpl { margin-right: 0; }
 .fx-fixed { margin: 6px 0; }
 .fx-fixed summary { cursor: pointer; }
-.tpl-layout { display: grid; grid-template-columns: 240px 1fr; gap: 16px; align-items: start; }
-.tpl-side { display: flex; flex-direction: column; gap: 8px; }
-.tpl-side .list { max-height: 60vh; overflow-y: auto; }
-.tpl-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left; margin-bottom: 6px; }
-.tpl-item.active { outline: 2px solid currentColor; }
-.tpl-form { max-height: 65vh; overflow-y: auto; padding-right: 6px; }
-.tpl-form fieldset { margin-bottom: 10px; }
-@media (max-width: 760px) { .tpl-layout { grid-template-columns: 1fr; } }
-#templates .modal.wide { width: 1000px; }
-.tpl-side .list { overflow-x: hidden; }
-.tpl-item, .tpl-item span { white-space: normal; overflow-wrap: anywhere; }
 .pick-list { display: flex; flex-direction: column; gap: 8px; max-height: 55vh; overflow-y: auto; }
 .pick { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid rgba(127,127,127,.35); border-radius: 8px; cursor: pointer; }
 .pick.active { border-color: currentColor; outline: 1px solid currentColor; }
@@ -199,3 +185,17 @@ body.dropping::after { content: "Drop the video to add it"; position: fixed; ins
 .mk-preview canvas { width: 216px; height: auto; border-radius: 6px; background: #111; }
 .mk-side { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 8px; }
 #cam-marker .modal.wide { width: 900px; }
+.chat-card { display: flex; flex-direction: column; gap: 12px; }
+.chat-step { display: flex; gap: 12px; align-items: flex-start; }
+.chat-step > div { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.chat-num { flex: 0 0 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; border: 2px solid currentColor; }
+.chat-copy { display: flex; flex-wrap: wrap; gap: 6px; }
+.chat-modes { display: flex; flex-direction: column; gap: 4px; }
+.chat-card textarea { width: 100%; box-sizing: border-box; font-family: inherit; }
+.chat-manual { font-size: 11px; }
+.setup-form { max-height: 70vh; overflow-y: auto; padding-right: 6px; display: flex; flex-direction: column; gap: 10px; }
+.setup-cam { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.setup-cam-row { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
+.mk-canvas { width: 216px; height: auto; border-radius: 6px; background: #111; }
+.pick.off { opacity: .55; cursor: default; }
+#setup .modal.wide { width: 920px; }

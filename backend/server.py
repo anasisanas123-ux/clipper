@@ -23,7 +23,7 @@ def _public_settings():
     # Keys never leave the engine; the UI only learns whether one is saved and its last 4 characters.
     s["key_hints"] = {p: ("…" + k[-4:]) for p, k in keys.items() if k}
     s["has_audd_key"] = bool(s.pop("audd_api_key"))
-    ready, why = providers.readiness(s | {"ai_keys": keys})
+    ready, why = providers.readiness(s | {"ai_keys": keys, "scorer": "ai"})   # is the connection set up?
     s["ai_ready"], s["ai_status"] = ready, why
     s["providers"] = {p: {k: v[k] for k in ("label", "needs_key", "key_url", "base")}
                       for p, v in providers.PROVIDERS.items()}
@@ -56,7 +56,7 @@ def post_settings(patch: dict = Body(...)):
             patch["ai_keys"] = {provider: ""}
     if patch.get("ai_model") is not None:
         patch["ai_models"] = {provider: str(patch.pop("ai_model")).strip()}
-    if patch.get("scorer") not in (None, "builtin", "ai"):
+    if patch.get("scorer") not in (None, "builtin", "ai", "chat"):
         raise HTTPException(400, "Unknown scoring mode")
     config.save_settings(patch)
     return _public_settings()
@@ -92,41 +92,65 @@ def create_job(body: dict = Body(...)):
             raise HTTPException(400, "That file type isn't supported. Use an mp4, mkv, mov, webm or similar video.")
     elif not re.match(r"https?://", url):
         raise HTTPException(400, "That isn't a link or a video file on this PC")
-    return jobs.create(url, body.get("kind") or "irl", body.get("topic") or "", body.get("template"))
+    return jobs.create(url, body.get("setup") or {})
 
 
-@app.get("/api/templates")
-def list_templates():
+@app.get("/api/setup")
+def setup_defaults():
+    """What the setup window for a new video starts with (the last video's choices), and the lists it offers."""
     s = config.load_settings()
-    # "base": the look from Settings plus the clip count and lengths, to fill in a new template
-    base = templates.base_style(s) | {k: s[k] for k in templates.FIND_KEYS}
-    return {"templates": templates.all_templates(), "default": s.get("default_template", ""),
-            "keys": list(templates.KEYS), "find_keys": list(templates.FIND_KEYS), "base": base,
-            "sound_roles": list(effects.SOUND_ROLES), "auto_songs": music.AUTO_SONG}
+    keys = {p: config.ai_key(s, p) for p in providers.PROVIDERS}
+    ready, why = providers.readiness(s | {"ai_keys": keys, "scorer": "ai"})
+    return {"defaults": templates.defaults(s), "keys": list(templates.KEYS), "find_keys": list(templates.FIND_KEYS),
+            "sound_roles": list(effects.SOUND_ROLES), "auto_songs": music.AUTO_SONG,
+            "ai_ready": ready, "ai_status": why}
 
 
-@app.post("/api/templates")
-def save_template(body: dict = Body(...)):
-    """Saves a look as a template (same name = update). make_default also makes it the default for new videos."""
-    t = templates.save(body.get("name") or "", body.get("style") or {}, body.get("id"))
-    if body.get("make_default"):
-        config.save_settings({"default_template": t["id"]})
-    return list_templates() | {"saved": t}
+@app.get("/api/source-frame")
+def source_frame(url: str, pos: float = 0.35):
+    """A frame from a link or file that hasn't been added yet, to draw the facecam on in the setup window."""
+    url = url.strip().strip('"')
+    if not (sources.is_local(url) or re.match(r"https?://", url)):
+        raise HTTPException(400, "That isn't a link or a video file on this PC")
+    try:
+        return Response(jobs.source_frame(url, pos), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+    except Exception as e:
+        raise HTTPException(400, f"Couldn't get a picture from this video: {str(e)[-200:]}")
 
 
-@app.post("/api/templates/default")
-def default_template(body: dict = Body(...)):
-    tid = body.get("id") or ""
-    if tid and not templates.get(tid):
-        raise HTTPException(404, "Template not found")
-    config.save_settings({"default_template": tid})
-    return list_templates()
+# ---- picking the moments with your own chatbot (copy the prompt out, paste the answer back)
+def _chat_call(fn, *args):
+    try:
+        return fn(*args)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
-@app.delete("/api/templates/{tid}")
-def delete_template(tid: str):
-    templates.delete(tid)
-    return list_templates()
+@app.get("/api/jobs/{job_id}/chat")
+def chat_info(job_id: str):
+    _job(job_id)
+    return _chat_call(jobs.chat_info, job_id)
+
+
+@app.get("/api/jobs/{job_id}/chat/prompt")
+def chat_prompt(job_id: str, mode: str = "flagged", part: int = 1):
+    _job(job_id)
+    return {"text": _chat_call(jobs.chat_prompt, job_id, mode, part)}
+
+
+@app.post("/api/jobs/{job_id}/chat/answer")
+def chat_answer(job_id: str, body: dict = Body(...)):
+    _job(job_id)
+    return _chat_call(jobs.chat_answer, job_id, body.get("text") or "")
+
+
+@app.post("/api/jobs/{job_id}/chat/finish")
+def chat_finish(job_id: str, body: dict = Body(default={})):
+    _job(job_id)
+    try:
+        return {"clips": _chat_call(jobs.chat_finish, job_id, bool(body.get("builtin")))}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/jobs/{job_id}/frame")
@@ -139,19 +163,6 @@ def job_frame(job_id: str, clip: str = ""):
         raise HTTPException(400, f"Couldn't get a frame from this video: {str(e)[-200:]}")
 
 
-@app.get("/api/frame/latest")
-def latest_frame():
-    """A frame from the most recent video that has clips, for marking the facecam in the template editor."""
-    for j in jobs.list_jobs():
-        job = jobs.get(j["id"])
-        if job and job.get("clips"):
-            try:
-                return Response(jobs.frame_jpeg(job), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
-            except Exception:
-                continue
-    raise HTTPException(404, "Add a video first: the facecam is marked on a frame from one of your videos.")
-
-
 @app.post("/api/jobs/{job_id}/cam")
 def set_cam(job_id: str, body: dict = Body(...)):
     """A facecam area marked by hand, for one clip or every clip in the video."""
@@ -161,14 +172,6 @@ def set_cam(job_id: str, body: dict = Body(...)):
     except ValueError as e:
         raise HTTPException(400, str(e))
 
-
-@app.post("/api/jobs/{job_id}/apply-template")
-def apply_template(job_id: str, body: dict = Body(...)):
-    _job(job_id)
-    try:
-        return {"queued": jobs.apply_template(job_id, body.get("id") or "")}
-    except ValueError as e:
-        raise HTTPException(404, str(e))
 
 
 def _job(job_id):
@@ -180,7 +183,10 @@ def _job(job_id):
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str):
-    return _job(job_id)
+    job = _job(job_id)
+    if job.get("status") == "analyzing" and job.get("stage") == "Queued":
+        return {**job, "stage": jobs.queue_note(job_id)}     # say what it's waiting for
+    return job
 
 
 @app.delete("/api/jobs/{job_id}")
