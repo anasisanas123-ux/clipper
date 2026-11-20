@@ -676,6 +676,41 @@ def source_frame(url: str, pos: float = 0.35) -> bytes:
         piece.unlink(missing_ok=True)
 
 
+def current_setup(job) -> dict:
+    """What a video's clips are made with now, to fill in the setup window when changing it."""
+    out = templates.job_style(config.load_settings(), job)
+    if job.get("cam_box") and out.get("cam_pos") in (None, "auto", "custom"):
+        out.update(cam_pos="custom", cam_box=job["cam_box"])
+    return out
+
+
+def change_setup(job_id, setup: dict) -> int:
+    """Changes how a video's clips are made: every clip gets the new look (with effects placed again on its own
+    moments) and the ones already rendered are rendered again. Clips found later use it too.
+    Returns how many were queued."""
+    job = _jobs[job_id]
+    clean = {k: v for k, v in templates.clean_style(setup or {}).items() if k in templates.KEYS}
+    with _lock:
+        job["setup"] = {**(job.get("setup") or {}), **clean}
+        if clean.get("cam_pos") == "custom":
+            job["cam_box"] = clean["cam_box"]
+        elif "cam_pos" in clean:
+            job.pop("cam_box", None)
+    style = templates.job_style(config.load_settings(), job)
+    count = 0
+    for i, c in enumerate(job["clips"]):
+        if c["status"] in ("queued", "rendering"):
+            continue
+        with _lock:
+            _apply_look(c, style, i)
+            c["effects"] = None
+        if c.get("version", 0) > 0 or c.get("preview_version", 0) > 0 or c["status"] == "error":
+            queue_render(job_id, c["id"], preview=c.get("showing") == "preview")
+            count += 1
+    _save(job)
+    return count
+
+
 def set_cam(job_id, box: dict, clip_id=None, everywhere=True) -> int:
     """Uses a facecam area marked by hand (shares of the frame) on one clip or every clip in the video, and
     re-renders the ones already rendered with the facecam framing. Returns how many were queued."""

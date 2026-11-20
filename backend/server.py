@@ -163,6 +163,18 @@ def job_frame(job_id: str, clip: str = ""):
         raise HTTPException(400, f"Couldn't get a frame from this video: {str(e)[-200:]}")
 
 
+@app.get("/api/jobs/{job_id}/setup")
+def job_setup(job_id: str):
+    """What a video's clips are made with now, to change it in the setup window."""
+    return {"values": jobs.current_setup(_job(job_id))}
+
+
+@app.post("/api/jobs/{job_id}/setup")
+def change_job_setup(job_id: str, body: dict = Body(...)):
+    _job(job_id)
+    return {"queued": jobs.change_setup(job_id, body.get("setup") or {})}
+
+
 @app.post("/api/jobs/{job_id}/cam")
 def set_cam(job_id: str, body: dict = Body(...)):
     """A facecam area marked by hand, for one clip or every clip in the video."""

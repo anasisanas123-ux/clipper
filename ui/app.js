@@ -239,20 +239,56 @@ async function openSetup(url) {
   try { state.tracks = (await api('/api/music')).tracks; } catch {}
   return new Promise((resolve) => {
     setupResolve = resolve;
-    buildSetup(url);
+    buildSetup({ url });
     $('#setup').showModal();
     $('#setup-form').scrollTop = 0;
   });
 }
+
+// The same window for a video that's already added: changes the look of all its clips.
+async function openJobSetup(job) {
+  await loadSetupInfo();
+  if (!state.fx || !Object.keys(state.fx.presets || {}).length) await loadEffects();
+  try { state.tracks = (await api('/api/music')).tracks; } catch {}
+  let values;
+  try { values = (await api(`/api/jobs/${job.id}/setup`)).values; } catch (err) { toast(err.message, true); return null; }
+  return new Promise((resolve) => {
+    setupResolve = resolve;
+    buildSetup({ job, values });
+    $('#setup').showModal();
+    $('#setup-form').scrollTop = 0;
+  });
+}
+
+async function changeJobSetup(job) {
+  const setup = await openJobSetup(job);
+  if (!setup) return;
+  try {
+    const r = await api(`/api/jobs/${job.id}/setup`, { body: { setup } });
+    // rebuilt so every clip card shows the new settings
+    state.cards.clear(); $('#j-clips').replaceChildren();
+    toast('Settings changed for every clip in this video' + (r.queued ? `; ${r.queued} clip${r.queued === 1 ? '' : 's'} rendering again` : '') + '.');
+    poll();
+  } catch (err) { toast(err.message, true); }
+}
+
 const setupFinish = (value) => { const r = setupResolve; setupResolve = null; $('#setup').close(); if (r) r(value); };
 $('#setup-cancel').onclick = () => setupFinish(null);
 $('#setup').addEventListener('cancel', (e) => { e.preventDefault(); setupFinish(null); });
 $('#setup-start').onclick = () => { const v = setupCollect && setupCollect(); if (v) setupFinish(v); };
 
-function buildSetup(url) {
-  const v = { ...((state.setup && state.setup.defaults) || {}) };
-  const name = url.split(/[\\/]/).pop() || url;
-  $('#setup-source').textContent = `How the clips from "${name.length > 70 ? name.slice(0, 67) + '…' : name}" are made. Nothing starts until you press Start. Filled in with what you chose last time.`;
+function buildSetup({ url, job, values }) {
+  const v = { ...(values || (state.setup && state.setup.defaults) || {}) };
+  if (job) {
+    $('#setup-title').textContent = 'Change this video\'s settings';
+    $('#setup-source').textContent = `How every clip of "${(job.title || job.url).slice(0, 70)}" is made. Applying gives all its clips these settings, places their effects again, and renders the ones already rendered again. Titles, text and cuts are kept.`;
+    $('#setup-start').textContent = 'Apply to every clip';
+  } else {
+    const name = url.split(/[\\/]/).pop() || url;
+    $('#setup-title').textContent = 'Set up this video';
+    $('#setup-source').textContent = `How the clips from "${name.length > 70 ? name.slice(0, 67) + '…' : name}" are made. Nothing starts until you press Start. Filled in with what you chose last time.`;
+    $('#setup-start').textContent = 'Start';
+  }
   const sel = (key, choices, value) => {
     const s = h('select', { name: key }, ...choices.map(([k, label]) => h('option', { value: k }, label)));
     s.value = value ?? choices[0][0];
@@ -286,7 +322,11 @@ function buildSetup(url) {
   const marker = makeMarker((b) => { if (b) { camBox = b; camPos.value = 'custom'; } });
   if (camBox) marker.set(camBox);
   let spot = 0, frameShown = false;
-  const showFrame = () => { marker.load(`/api/source-frame?url=${encodeURIComponent(url)}&pos=${FRAME_SPOTS[spot % FRAME_SPOTS.length]}`); frameShown = true; };
+  const clipIds = job ? job.clips.map((c) => c.id) : [];
+  const frameUrl = () => (job
+    ? `/api/jobs/${job.id}/frame` + (clipIds.length ? `?clip=${clipIds[spot % clipIds.length]}` : '')
+    : `/api/source-frame?url=${encodeURIComponent(url)}&pos=${FRAME_SPOTS[spot % FRAME_SPOTS.length]}`);
+  const showFrame = () => { marker.load(frameUrl()); frameShown = true; };
   const another = h('button', { type: 'button', title: 'If the facecam isn\'t visible in this picture' }, 'Show another moment');
   another.onclick = () => { spot += 1; showFrame(); };
   const clear = h('button', { type: 'button' }, 'Clear the box');
@@ -324,7 +364,7 @@ function buildSetup(url) {
 
   const form = $('#setup-form');
   form.replaceChildren(
-    section('The video',
+    job ? null : section('The video',
       h('div', { class: 'grid2' }, fld('Type of video', sel('kind', CHOICES.kind, v.kind)),
         fld('Topic (optional)', h('input', { type: 'text', name: 'topic', placeholder: 'e.g. GTA 6', maxLength: 80, autocomplete: 'off' }))),
       h('div', { class: 'field' }, h('span', {}, 'How to pick the clips'), scorers)),
@@ -347,9 +387,10 @@ function buildSetup(url) {
     section('Timeline',
       h('div', { class: 'opts' }, box('tighten', 'Cut pauses (jump cuts)'), box('cold_open', 'Cold open (teaser first)'),
         box('track_face', 'Follow the face'), box('beat_sync', 'Effects on the song\'s beat'))),
-    section('Clips',
+    job ? null : section('Clips',
       h('div', { class: 'grid3' }, fld('How many clips', num('clip_count', { min: 1, max: 30 })),
         fld('Shortest (sec)', num('min_len', { min: 5, max: 120 })), fld('Longest (sec)', num('max_len', { min: 10, max: 180 })))));
+  for (const node of [...form.childNodes]) if (node.nodeType === Node.TEXT_NODE) node.remove();   // the sections left out
   showFraming();
 
   setupCollect = () => {
@@ -487,6 +528,7 @@ function renderJob(job) {
           h('button', { onclick: () => batch('render-all', {}, 'full-quality render'), title: 'Render every clip in full quality with its current settings' }, 'Render all'),
           h('button', { onclick: exportAll, title: 'Copy every full-quality clip to the exports folder with its description' }, 'Export all'),
           h('button', { onclick: scheduleAll, title: 'Upload every rendered clip to YouTube, one per free daily slot, best score first' }, 'Schedule all to YouTube'),
+          h('button', { onclick: () => changeJobSetup(state.job), title: 'Framing, facecam, captions, effects, sounds, song and timeline options for every clip of this video' }, 'Change settings…'),
           h('button', { class: 'danger', onclick: removeJob }, 'Delete'))),
       h('div', { id: 'j-status' }),
       h('div', { id: 'j-clips', class: 'clips' }));
