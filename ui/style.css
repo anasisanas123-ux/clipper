@@ -168,3 +168,8 @@ body.dropping::after { content: "Drop the video to add it"; position: fixed; ins
 .live-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .live-row button { margin-left: auto; }
 .job-sub .live-dot { font-size: 11px; }
+.tpl-apply { display: inline-flex; gap: 4px; }
+.tpl-apply select { max-width: 170px; }
+.actions .link.tpl { margin-right: 0; }
+.fx-fixed { margin: 6px 0; }
+.fx-fixed summary { cursor: pointer; }

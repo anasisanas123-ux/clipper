@@ -132,6 +132,61 @@ def _hook(text, kind="irl"):
     return max(parts, key=lambda p: len(HYPE.findall(p)) * 2 + p.count("!") + p.count("?"))
 
 
+_WORD = re.compile(r"[a-z0-9']+")
+
+
+def quotes_speech(title: str, text: str) -> bool:
+    """True when a title is just a line from the speech: it shares a run of four words with the transcript, or a
+    short title appears in it word for word."""
+    t = _WORD.findall((title or "").lower())
+    s = _WORD.findall((text or "").lower())
+    if len(t) < 3 or not s:
+        return False
+    n = 4 if len(t) >= 4 else 3
+    grams = {tuple(s[i:i + n]) for i in range(len(s) - n + 1)}
+    return any(tuple(t[i:i + n]) in grams for i in range(len(t) - n + 1))
+
+
+# Titles the built-in engine writes from what kind of moment it is, instead of quoting the speech.
+TITLES = {
+    "funny": ["{who} couldn't keep a straight face after this", "Chat lost it after this moment",
+              "{who} was not ready for this", "This had {who} crying laughing"],
+    "rage": ["{who} completely lost it here", "This is the moment {who} snapped",
+             "{who} was so done with this", "Nobody could calm {who} down after this"],
+    "tense": ["This got way too intense", "{who} knew something was wrong", "Wait for what happens next",
+              "The tension in this moment was unreal"],
+    "hype": ["{who} went absolutely crazy here", "Nobody expected this to happen{topic}",
+             "This is why people watch {who}", "{who} pulled this off live"],
+    "emotional": ["{who} got real for a second", "This moment hit different", "{who} opened up about this",
+                  "Nobody expected {who} to say this"],
+    "chill": ["{who} explained this perfectly", "This changed how I see it", "{who} said what everyone was thinking",
+              "Wait until you hear this"],
+}
+QUOTE_TITLES = ["{who} said what nobody wants to hear", "{who}'s take on this is controversial",
+                "{who} explains the truth about this", "This is the part nobody talks about"]
+MONEY = re.compile(r"(\$\s?[\d,.]+\s?(k|m|million|thousand)?|\b\d[\d,.]*\s?(k|million|billion|thousand|grand|dollars)\b)", re.I)
+
+
+def make_title(text, mood, kind, who="", topic="", seed=0) -> str:
+    """A descriptive title for a moment (built-in engine), built from its mood, the creator and the topic."""
+    who = (who or "").strip() or ("He" if kind != "podcast" else "This guy")
+    pool = QUOTE_TITLES if kind == "podcast" and QUOTE.search(text or "") else TITLES.get(mood, TITLES["hype"])
+    money = MONEY.search(text or "")
+    if money and kind != "podcast":
+        pool = [f"{{who}} and the {money.group(0).strip()} moment", *pool]
+    # patterns start with a capital or the creator's name, which keeps its own spelling (xQc, not XQc)
+    return pool[seed % len(pool)].format(who=who, topic=f" in {topic}" if topic and kind == "gaming" else "")
+
+
+def video_rates(segments, n):
+    """Reaction words and quotable cues per second across the whole video, to judge a clip against its video."""
+    hype = quote = 0.0
+    for s in segments:
+        h, q = _counts(s["text"])
+        hype, quote = hype + h, quote + q
+    return hype / max(1, n), quote / max(1, n)
+
+
 def _reasons(sub, kind):
     out = []
     if sub["energy"] >= 60:

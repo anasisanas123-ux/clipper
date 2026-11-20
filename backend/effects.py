@@ -36,7 +36,28 @@ FILTERS = {
     "retro": ("Retro / VHS", "curves=preset=vintage,eq=saturation=1.2,noise=alls=10:allf=t"),
     "deepfried": ("Deep-fried", "eq=contrast=1.6:saturation=2.6,colorbalance=rm=0.15:bm=-0.12,unsharp=7:7:2.5"),
 }
-ENDING_GRADE = "eq=contrast=1.45:saturation=1.9,colorbalance=rm=0.16:gm=0.04:bm=-0.14:rh=0.1:bh=-0.12,unsharp=7:7:1.6"
+POST_FILTERS = ("unsharp", "vignette", "noise")   # depend on the final frame size, so they run on the finished picture
+RGB_ONLY = ("colorbalance", "curves")
+
+
+def split_look(filt: str) -> tuple:
+    """A colour filter split in two: the colour grading (applied to the source crop before it is scaled up to
+    1080x1920, which is 2-3 times fewer pixels and the slowest part of a render) and the parts that must run on
+    the finished frame (sharpening, vignette, grain). Returns (pre, post) filter strings, either may be ''."""
+    parts = [p for p in (FILTERS.get(filt, ("", ""))[1] or "").split(",") if p]
+    post = [p for p in parts if p.split("=")[0] in POST_FILTERS]
+    # colorbalance and curves only work in RGB. Left to itself, ffmpeg converts the WHOLE source frame to RGB at
+    # the very start of the graph (single-threaded, every frame); pinning the formats keeps the conversion
+    # right around these filters, on the small crop, and everything else in yuv420p.
+    pre = [f"format=gbrp,{p},format=yuv420p" if p.split("=")[0] in RGB_ONLY else p for p in parts if p not in post]
+    return ",".join(pre), ",".join(post)
+
+
+# The deep-fried ending: punchy contrast and saturation with a warm orange push. The warm push shifts the colour
+# channels directly in YUV (lutyuv) rather than with colorbalance, which would convert every frame of the whole
+# clip to RGB and back even while the ending is switched off.
+ENDING_GRADE = ["eq=contrast=1.45:saturation=1.9", "lutyuv=u='clip(val-10,16,240)':v='clip(val+11,16,240)'",
+                "unsharp=7:7:1.6"]
 
 # ---------------------------------------------------------------- visual effects
 VISUALS = {
@@ -187,6 +208,95 @@ def resolve_sound(sound_id: str):
     return None, 0.0
 
 
+# ================================================================ choosing sounds (yours first)
+# What a sound is, guessed from its file name, so your own meme sounds land on the right kind of moment.
+SOUND_KINDS = {
+    "whoosh": re.compile(r"whoosh|swoosh|swish|woosh|transition|swipe", re.I),
+    "build": re.compile(r"riser|rise|louder|build|drum.?roll|tension", re.I),
+    "win": re.compile(r"ka.?ching|money|cash|coin|correct|ding|rizz|romance|win|yay|success|level.?up|cha.?ching", re.I),
+    "fail": re.compile(r"fail|slip|bad.?to.?the.?bone|get.?out|bruh|sad|trombone|nope|oof|wrong|bonk|error|fah", re.I),
+    "shock": re.compile(r"huh|shock|ahh|awkward|alert|prowler|\back\b|dexter|bell|dayum|damn|wow|what|scream|gasp|"
+                        r"metal.?gear|suspense|omg", re.I),
+    "impact": re.compile(r"boom|explos|punch|gun|shot|crack|slap|hit|bam|bang|smack|kick|vine|thud|impact", re.I),
+    "funny": re.compile(r"nom|chicken|cartoon|honk|laugh|meme|boing|squeak|fart|silly", re.I),
+}
+# Built-in fallbacks for each role when you have no sound of that kind.
+ROLE_BUILTIN = {"intro": "builtin/whoosh", "transition": "builtin/whoosh", "hit": "builtin/hit",
+                "big": "builtin/boom", "ending": "builtin/boom", "emoji": "builtin/pop", "build": "builtin/riser",
+                "drop": "builtin/bassdrop"}
+# The kinds of your sounds that suit each role, best first. Transitions and build-ups only use sounds that
+# really are whooshes or risers; a meme sound there would just be noise.
+# Build-ups stay on the built-in riser: it is timed to start before the moment, while a file's lead-in is unknown.
+ROLE_KINDS = {"intro": ["whoosh"], "transition": ["whoosh"], "build": [],
+              "hit": ["impact"], "big": ["impact"], "drop": ["impact"],
+              "ending": ["fail", "shock", "impact", "funny"], "emoji": ["funny", "shock"]}
+SOUND_ROLES = ("intro", "hit", "big", "transition", "ending", "emoji")
+CONTEXT = [   # words around a moment -> the kind of sound that fits it
+    ("win", re.compile(r"\b(money|cash|rich|paid|dollars?|bucks|\$\s?\d|bought|won|win|winner|first place|let'?s go+)\b", re.I)),
+    ("fail", re.compile(r"\b(fail\w*|lost|lose|died|dead|missed|fell|oh no+|i'?m done|it'?s over|trash|unlucky|bruh)\b", re.I)),
+    ("shock", re.compile(r"\b(what|wait|huh|no way|oh my god|omg|bro|are you serious|excuse me|wtf|yo+)\b", re.I)),
+    ("funny", re.compile(r"\b(a?ha(ha)+|lol|lmao+|funny|joke)\b", re.I)),
+]
+MOOD_KIND = {"funny": "fail", "rage": "impact", "tense": "shock", "hype": "impact", "emotional": None, "chill": None}
+
+
+def sound_kind(name: str) -> str:
+    for kind, rx in SOUND_KINDS.items():
+        if rx.search(name):
+            return kind
+    return "meme"
+
+
+def _my_sounds() -> dict:
+    """Your sounds grouped by kind: {kind: [sound id, ...]}."""
+    out = {}
+    for s in sounds():
+        if s["source"] == "mine":
+            out.setdefault(sound_kind(s["name"]), []).append(s["id"])
+    return out
+
+
+class SoundPicker:
+    """Chooses the sound for each automatic effect. `source`: "auto" (your sounds when you have any, otherwise
+    the built-in ones), "mine" or "builtin". `fixed` maps a role to one sound you always want there (from a
+    template). Picks rotate so a clip doesn't repeat the same sound, and the same clip always gets the same picks."""
+
+    def __init__(self, source="auto", fixed=None, seed=""):
+        self.mine = _my_sounds() if source in ("auto", "mine", None, "") else {}
+        self.fixed = {k: v for k, v in (fixed or {}).items() if k in SOUND_ROLES and v and resolve_sound(v)[0]}
+        self.rng = random.Random(str(seed))
+        self.used = set()
+
+    def _from(self, kinds):
+        """A sound of the first kind in `kinds` you have, preferring one this clip hasn't used yet."""
+        for k in kinds:
+            pool = self.mine.get(k, [])
+            if pool:
+                fresh = [s for s in pool if s not in self.used]
+                pick = self.rng.choice(fresh or pool)
+                self.used.add(pick)
+                return pick
+        return ""
+
+    def pick(self, role, words=None, mood=None) -> str:
+        if self.fixed.get(role):
+            return self.fixed[role]
+        if self.mine:
+            kinds = list(ROLE_KINDS.get(role, ["impact"]))
+            if role in ("hit", "big", "ending", "emoji"):
+                # what is being said at that moment decides the kind of sound first, then the clip's mood
+                text = " ".join(w["text"] for w in (words or []))
+                said = next((k for k, rx in CONTEXT if rx.search(text)), None)
+                lead = [k for k in (said, MOOD_KIND.get(mood) if role != "hit" else None) if k]
+                kinds = lead + [k for k in kinds if k not in lead]
+                if role != "hit":
+                    kinds.append("meme")     # unknown meme sounds still suit endings and emoji pop-ups
+            got = self._from(kinds)
+            if got:
+                return got
+        return ROLE_BUILTIN.get(role, "builtin/hit")
+
+
 # ================================================================ emoji images
 def emoji_png(emoji: str, size=300) -> Path:
     key = "-".join(f"{ord(c):x}" for c in emoji)
@@ -241,11 +351,13 @@ def _snap_to_word(t, words, start):
     return best if best is not None else t
 
 
-def suggest(preset: str, clip: dict, z, words: list, offset: float, env=None, plan=None, beats=None) -> dict:
+def suggest(preset: str, clip: dict, z, words: list, offset: float, env=None, plan=None, beats=None,
+            sound_source="auto", sound_fixed=None) -> dict:
     """Effects for one clip, timed on the finished Short. `words` are timed against the clip's source file;
     `offset` is where the cut starts inside that file (so a word at offset is t=0). Optional: `env` is the 10 ms
     loudness envelope in clip time (lands hits exactly), `plan` the timeline edit (dead-air cuts / cold open),
-    `beats` the chosen song's beat times (effects snap to the beat)."""
+    `beats` the chosen song's beat times (effects snap to the beat). `sound_source` / `sound_fixed` choose between
+    your own sounds and the built-in ones (see SoundPicker)."""
     from . import timeline
     preset = preset if preset in PRESETS else "edit"
     orig_dur = float(clip["end"] - clip["start"])
@@ -271,45 +383,52 @@ def suggest(preset: str, clip: dict, z, words: list, offset: float, env=None, pl
     teaser = (plan["segments"][0][1] - plan["segments"][0][0]) if plan and plan.get("teaser") else 0.0
     peaks = [p for p in peaks if p[0] > teaser + 0.3 or not teaser]
     ev = []
+    picker = SoundPicker(sound_source, sound_fixed, clip.get("id", ""))
+    mood = clip.get("mood")
+    near = lambda t: [w for w in rel_words if t - 2.0 <= w["start"] <= t + 0.6]
+    snd = lambda role, t=0.0: picker.pick(role, near(t), mood)
     add = lambda t, fx, sound="", emoji="": ev.append(
         {"t": round(max(0.0, min(dur - 0.1, t)), 2), "fx": fx, "sound": sound, "emoji": emoji})
     mood_emoji = MOOD_EMOJI.get(clip.get("mood"), "💀")
     ending_at = max(dur * 0.6, dur - 1.8)
 
     if preset == "subtle":
-        add(0, "punch", "builtin/whoosh")
+        add(0, "punch", snd("intro"))
         for t, _ in peaks[:2]:
             add(t, "punch")
     elif preset == "edit":
-        add(0, "punch", "builtin/whoosh")
+        add(0, "punch", snd("intro"))
         usable = [p for p in peaks if p[0] < ending_at - 1.0][: max(1, int(dur / 5))]
         for n, (t, v) in enumerate(sorted(usable)):
             biggest = v == max(p[1] for p in usable)
-            add(t, "flash" if biggest else "punch", "builtin/boom" if biggest else "builtin/hit")
+            add(t, "flash" if biggest else "punch", snd("big" if biggest else "hit", t))
         if dur > 8:
-            add(ending_at - 0.25, "blur", "builtin/whoosh")
-        add(ending_at, "ending", "builtin/boom", "💀" if clip.get("mood") in (None, "hype", "tense") else mood_emoji)
+            add(ending_at - 0.25, "blur", snd("transition"))
+        add(ending_at, "ending", snd("ending", ending_at), "💀" if clip.get("mood") in (None, "hype", "tense") else mood_emoji)
     elif preset == "hype":
-        add(0, "shake", "builtin/boom")
+        add(0, "shake", picker.pick("drop"))       # an impact to open on, whatever the clip's mood
         usable = [p for p in peaks if 0.8 < p[0] < ending_at - 1.0][: max(2, int(dur / 4))]
         for n, (t, v) in enumerate(sorted(usable)):
-            add(t, ["shake", "punch", "flash"][n % 3], ["builtin/boom", "builtin/hit", "builtin/glitch"][n % 3])
+            add(t, ["shake", "punch", "flash"][n % 3], snd(["big", "hit", "hit"][n % 3], t))
+        # an emoji landing on a hit stays silent, so two sounds don't play over each other
+        quiet = lambda t: any(abs(e["t"] - t) < 0.6 and e["sound"] for e in ev)
         laughs = [w["start"] for w in rel_words if LAUGH.search(w["text"])]
         if laughs:
-            add(laughs[0], "emoji", "builtin/pop", "😂")
+            add(laughs[0], "emoji", "" if quiet(laughs[0]) else snd("emoji", laughs[0]), "😂")
         shocks = [w["start"] for w in rel_words if SHOCK.search(w["text"]) and w["start"] > 1.5]
         if shocks and not laughs:
-            add(shocks[0], "emoji", "builtin/pop", random.Random(clip.get("id")).choice(["😳", "🤯", "😱"]))
-        add(ending_at, "ending", "builtin/bassdrop", mood_emoji)
+            add(shocks[0], "emoji", "" if quiet(shocks[0]) else snd("emoji", shocks[0]),
+                random.Random(clip.get("id")).choice(["😳", "🤯", "😱"]))
+        add(ending_at, "ending", snd("ending", ending_at), mood_emoji)
     elif preset == "cinematic":
         if peaks:
             t, _ = max(peaks, key=lambda p: p[1])
-            add(t, "flash", "builtin/riser")
-            add(t + 0.02, "punch", "builtin/bassdrop")
-        add(0, "none", "builtin/whoosh")
+            add(t, "flash", picker.pick("build"))
+            add(t + 0.02, "punch", picker.pick("drop", near(t), mood))
+        add(0, "none", snd("intro"))
     if teaser:
         # cold open: the teaser plays, then a whoosh and whip blur jump back to the start of the story
-        add(teaser - 0.12, "blur", "builtin/whoosh")
+        add(teaser - 0.12, "blur", snd("transition"))
     if beats:
         for e in ev:
             if e["t"] > 0.3 and e["fx"] != "blur":
@@ -352,12 +471,16 @@ def video_fps(path) -> float:
 
 
 def video_filters(inp: str, filt: str, events: list, dur: float, fps: float, emoji_inputs: dict,
-                  size=(1080, 1920)) -> tuple:
+                  size=(1080, 1920), graded=False) -> tuple:
     """Filter-graph pieces that take [inp] (the 1080x1920 picture) to a new label. emoji_inputs maps
-    event index -> ffmpeg input index of that event's emoji image stream. Returns (pieces, out_label)."""
+    event index -> ffmpeg input index of that event's emoji image stream. graded=True means the colour grading
+    was already applied before scaling (see split_look), so only the size-dependent part is added here.
+    Returns (pieces, out_label)."""
     chain = []
-    if FILTERS.get(filt, ("", ""))[1]:
-        chain.append(FILTERS[filt][1])
+    pre, post = split_look(filt)
+    look = post if graded else ",".join(p for p in (pre, post) if p)
+    if look:
+        chain.append(look)
 
     zoom_terms, shake = [], []
     flashes, blurs = [], []
@@ -393,7 +516,7 @@ def video_filters(inp: str, filt: str, events: list, dur: float, fps: float, emo
         b = "+".join(f"0.85*between(t,{t:.3f},{t + 0.3:.3f})*(1-(t-{t:.3f})/0.3)" for t in flashes)
         chain.append(f"eq=brightness='min(1,{b})':eval=frame")
     if ending:
-        chain += [f"{p}:enable='gte(t,{ending['t']:.3f})'" for p in ENDING_GRADE.split(",")]
+        chain += [f"{p}:enable='gte(t,{ending['t']:.3f})'" for p in ENDING_GRADE]
 
     pieces, label = [], inp
     if chain:

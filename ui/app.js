@@ -101,11 +101,63 @@ $('#new-job').addEventListener('submit', async (e) => {
   const url = $('#url').value.trim();
   if (!url) return;
   try {
-    const job = await api('/api/jobs', { body: { url, kind: $('#kind').value, topic: $('#topic').value.trim() } });
+    const job = await api('/api/jobs', { body: { url, kind: $('#kind').value, topic: $('#topic').value.trim(), template: $('#template').value } });
     $('#url').value = '';
     openJob(job.id);
   } catch (err) { toast(err.message, true); }
 });
+
+// ---------- templates ----------
+// A template is a saved look (framing, facecam corner, captions, effects, sounds, song, filter, timeline options)
+// that every clip of a new video is made with.
+async function loadTemplates() {
+  try { state.tpl = await api('/api/templates'); } catch { state.tpl = { templates: [], default: '', auto_songs: {} }; }
+  fillTemplateSelect($('#template'), state.tpl.default, 'Settings defaults (no template)');
+  const pick = $('#job-template');
+  if (pick) fillTemplateSelect(pick, '', 'Apply a template…');
+}
+
+function fillTemplateSelect(select, current, emptyLabel) {
+  const list = (state.tpl && state.tpl.templates) || [];
+  select.replaceChildren(h('option', { value: '' }, emptyLabel),
+    ...list.map((t) => h('option', { value: t.id }, t.name + (state.tpl.default === t.id && emptyLabel !== 'Apply a template…' ? ' (default)' : ''))));
+  select.value = list.some((t) => t.id === current) ? current : '';
+}
+
+async function saveTemplate(style) {
+  const list = (state.tpl && state.tpl.templates) || [];
+  const name = prompt('Name this template (an existing name updates that template):', list.length ? '' : 'My style');
+  if (name == null) return;
+  const makeDefault = confirm('Make every new video use this template?\n\nOK = yes, make it the default. Cancel = just save it (pick it next to "Find clips" when you want it).');
+  try {
+    const r = await api('/api/templates', { body: { name, style, make_default: makeDefault } });
+    state.tpl = r;
+    await loadTemplates();
+    toast(`Template "${r.saved.name}" saved${makeDefault ? ' and used for every new video' : ''}`);
+  } catch (err) { toast(err.message, true); }
+}
+
+async function applyTemplateToJob() {
+  const id = $('#job-template').value;
+  if (!id) return toast('Pick a template first', true);
+  const name = state.tpl.templates.find((t) => t.id === id)?.name;
+  if (!confirm(`Give every clip in this video the "${name}" look? Clips already rendered are rendered again. Titles and text are kept.`)) return;
+  try {
+    const r = await api(`/api/jobs/${state.jobId}/apply-template`, { body: { id } });
+    // cards are rebuilt so their controls show the template's settings
+    state.cards.clear(); $('#j-clips').replaceChildren();
+    toast(`Template applied${r.queued ? `; ${r.queued} clip${r.queued === 1 ? '' : 's'} re-rendering` : ''}`);
+    poll();
+  } catch (err) { toast(err.message, true); }
+}
+
+function songSelectOptions(select, current, withAuto) {
+  const opts = [h('option', { value: '' }, 'No song')];
+  if (withAuto) for (const [k, v] of Object.entries((state.tpl && state.tpl.auto_songs) || {})) opts.push(h('option', { value: k }, v));
+  for (const t of state.tracks) opts.push(h('option', { value: t.id }, (t.source === 'mine' ? '★ ' : '') + t.title + (t.artist ? ' – ' + t.artist : '') + (t.mood ? ` (${t.mood})` : '')));
+  select.replaceChildren(...opts);
+  select.value = [...select.options].some((o) => o.value === current) ? current : '';
+}
 
 // ---------- job view ----------
 let pollTimer;
@@ -134,19 +186,24 @@ function renderJob(job) {
           h('button', { onclick: () => batch('render-all', {}, 'full-quality render'), title: 'Render every clip in full quality with its current settings' }, 'Render all'),
           h('button', { onclick: exportAll, title: 'Copy every full-quality clip to the exports folder with its description' }, 'Export all'),
           h('button', { onclick: scheduleAll, title: 'Upload every rendered clip to YouTube, one per free daily slot, best score first' }, 'Schedule all to YouTube'),
+          h('span', { class: 'tpl-apply' }, h('select', { id: 'job-template', title: 'Give every clip in this video a saved template\'s look' }),
+            h('button', { onclick: applyTemplateToJob }, 'Apply')),
           h('button', { class: 'danger', onclick: removeJob }, 'Delete'))),
       h('div', { id: 'j-status' }),
       h('div', { id: 'j-clips', class: 'clips' }));
+    fillTemplateSelect($('#job-template'), '', 'Apply a template…');
   }
   $('#j-title').textContent = job.title || job.url;
   const kinds = { irl: 'IRL', gaming: 'Gaming', film: 'Film / TV reaction', podcast: 'Podcast' };
   const from = job.platform && job.platform !== 'local file' ? `${job.streamer} on ${job.platform}` : job.platform || job.streamer;
   const bits = [from, [kinds[job.kind], job.topic].filter(Boolean).join(': '), job.duration ? fmtTime(job.duration) + ' long' : null];
+  const tplName = job.template && ((state.tpl && state.tpl.templates) || []).find((t) => t.id === job.template)?.name;
+  if (tplName) bits.push(`template: ${tplName}`);
   if (job.status === 'ready') {
     if (job.ai) {
       const used = job.ai.cost_usd != null ? `about $${job.ai.cost_usd.toFixed(2)}`
         : job.ai.input_tokens ? `${Math.round((job.ai.input_tokens + (job.ai.output_tokens || 0)) / 1000)}k tokens` : '';
-      bits.push(`scored by ${job.ai.provider || 'Claude'} (${[job.ai.model, used].filter(Boolean).join(', ')})`);
+      bits.push(`picked by ${job.ai.provider || 'Claude'} + the built-in engine (${[job.ai.model, used].filter(Boolean).join(', ')})`);
     } else bits.push('scored by the built-in algorithm');
     if (job.engine) bits.push('speech recognition on ' + (job.engine.device === 'cuda' ? 'GPU' : 'CPU'));
   }
@@ -250,12 +307,7 @@ const band = (s) => s >= 80 ? ['Very high', 'vh'] : s >= 65 ? ['High', 'hi'] : s
 const RISK = { low: 'Low copyright risk', medium: 'Medium copyright risk', high: 'High copyright risk' };
 
 function songOptions(select, current) {
-  const opts = [h('option', { value: '' }, 'No song')];
-  for (const t of state.tracks) {
-    opts.push(h('option', { value: t.id }, (t.source === 'mine' ? '★ ' : '') + t.title + (t.artist ? ' – ' + t.artist : '') + (t.mood ? ` (${t.mood})` : '')));
-  }
-  select.replaceChildren(...opts);
-  select.value = state.tracks.some((t) => t.id === current) ? current : '';
+  songSelectOptions(select, current, true);
 }
 
 function buildCard(job, clip) {
@@ -292,10 +344,20 @@ function buildCard(job, clip) {
   const zoom = h('input', { type: 'range', min: 30, max: 100, step: 1, value: clip.zoom || 73 });
   const zoomLabel = h('span', {});
   const zoomField = h('label', { class: 'field' }, zoomLabel, zoom);
+  const camPos = h('select', {},
+    h('option', { value: 'auto' }, 'Find it automatically'), h('option', { value: 'tl' }, 'Top left'),
+    h('option', { value: 'tr' }, 'Top right'), h('option', { value: 'bl' }, 'Bottom left'), h('option', { value: 'br' }, 'Bottom right'));
+  const splitGame = h('select', {},
+    h('option', { value: 'fill' }, 'Fill the panel (crops the sides)'), h('option', { value: 'fit' }, 'Show the whole game (blurred edges)'));
+  camPos.value = clip.cam_pos || 'auto'; splitGame.value = clip.split_game || 'fill';
+  const splitFields = h('div', { class: 'grid2' },
+    h('label', { class: 'field' }, h('span', {}, 'Where the facecam is in the stream'), camPos),
+    h('label', { class: 'field' }, h('span', {}, 'Gameplay (bottom)'), splitGame));
   const showZoom = () => {
     zoomLabel.textContent = `Zoom: picture fills ${zoom.value}% of the height` + (+zoom.value >= 100 ? ' (no bars)' : '');
     zoomField.hidden = !['bars', 'blur'].includes(layout.value);
     storyFields.hidden = layout.value !== 'story';
+    splitFields.hidden = !['split', 'auto'].includes(layout.value);
   };
   const storyText = h('textarea', { rows: 3, maxLength: 400, value: clip.story || clip.title || '',
     placeholder: 'What is happening and why it matters. Put [square brackets] around phrases to colour them.' });
@@ -382,8 +444,14 @@ function buildCard(job, clip) {
     highlight: colour.value, song: song.value, music_volume: +volume.value, progress_bar: bar.checked,
     start: draft.start, end: draft.end, story: storyText.value.trim(), comment: comment.value.trim(),
     tighten: tighten.box.checked, cold_open: coldOpen.box.checked, track_face: trackFace.box.checked, beat_sync: beatSync.box.checked,
+    cam_pos: camPos.value, split_game: splitGame.value,
     ...fx.value(),
   });
+  // The look only (no text, cut or effect times), for a template.
+  const STYLE = (state.tpl && state.tpl.keys) || [];
+  const styleNow = () => { const b = settingsBody(); return Object.fromEntries(STYLE.filter((k) => k in b).map((k) => [k, b[k]])); };
+  const tplBtn = h('button', { class: 'link tpl', title: 'Save this clip\'s look (framing, facecam corner, captions, effects style, sounds, song, filter, timeline options) so new videos are made with it',
+    onclick: () => saveTemplate(styleNow()) }, 'Save as template');
   async function doRender(preview) {
     try {
       await api(`/api/jobs/${job.id}/clips/${clip.id}/render`, { body: { ...settingsBody(), preview } });
@@ -416,7 +484,7 @@ function buildCard(job, clip) {
 
   const field = (label, control, extra) => h('label', { class: 'field' }, h('span', {}, label), control, extra);
   const fx = buildEffects(job, clip, () => ({ start: draft.start, end: draft.end, tighten: tighten.box.checked,
-    cold_open: coldOpen.box.checked, song: song.value }), video);
+    cold_open: coldOpen.box.checked, song: song.value.startsWith('auto:') ? undefined : song.value }), video);
   const el = h('article', { class: 'clip' },
     h('div', { class: 'player' }, video, overlay, badge),
     h('div', { class: 'info' },
@@ -424,7 +492,8 @@ function buildCard(job, clip) {
         h('div', { class: 'score ' + bandClass }, h('b', {}, String(clip.score)), h('small', {}, '/100')),
         h('div', {},
           h('div', { class: 'score-label' }, 'Viral chance: ' + bandText),
-          h('div', { class: 'hint' }, clip.source === 'ai' || clip.source === 'claude' ? `${clip.scored_by || 'Claude'}'s estimate from the transcript and audio` : 'Built-in estimate from loudness and speech cues'))),
+          h('div', { class: 'hint' }, clip.engine ? `Combined: ${clip.scored_by || 'AI'} ${clip.engine.ai} + built-in engine ${clip.engine.builtin}${clip.engine.agreement >= 0.5 ? ', both found this moment' : ''}`
+            : clip.source === 'ai' || clip.source === 'claude' ? `${clip.scored_by || 'Claude'}'s estimate from the transcript and audio` : 'Built-in estimate from loudness and speech cues'))),
       h('div', { class: 'bars' }, Object.entries(clip.breakdown || {}).map(([k, v]) =>
         h('div', { class: 'mini' }, h('span', {}, k), h('div', { class: 'bar' }, h('div', { style: `width:${v}%` })), h('em', {}, String(v))))),
       h('ul', { class: 'reasons' }, (clip.reasons || []).map((r) => h('li', {}, r))),
@@ -433,7 +502,7 @@ function buildCard(job, clip) {
         field('Title', title, ideasBtn), ideasBox, field('Hashtags (#shorts is added automatically)', tags),
         memeField, hookField,
         h('div', { class: 'grid2' }, field('Framing', layout, layoutNote), field('Captions', caps)),
-        zoomField, storyFields,
+        splitFields, zoomField, storyFields,
         h('div', { class: 'grid2' }, field('Highlight', colour), field('Song', song)),
         h('div', { class: 'grid2' }, field('Song volume', volume),
           h('label', { class: 'row' }, bar, ' Progress bar')),
@@ -446,7 +515,7 @@ function buildCard(job, clip) {
             h('button', { onclick: nudge('end', 1), title: 'End 1s later' }, 'end ▶'))),
         h('div', { class: 'opts' }, tighten.el, coldOpen.el, trackFace.el, beatSync.el),
         fx.el),
-      h('div', { class: 'actions' }, styleBtn, previewBtn, renderBtn, exportBtn),
+      h('div', { class: 'actions' }, tplBtn, styleBtn, previewBtn, renderBtn, exportBtn),
       h('div', { class: 'yt' }, h('span', { class: 'hint' }, 'YouTube'), h('div', { class: 'yt-row' }, ytButtons), ytStatus,
         h('div', { class: 'yt-row' }, h('span', { class: 'hint' }, 'Other apps:'),
           ...shareButtons))));
@@ -479,7 +548,9 @@ function buildCard(job, clip) {
     exportBtn.disabled = busy || !fullReady;
     exportBtn.title = fullReady ? '' : 'Render in full quality first';
     for (const b of shareButtons) b.disabled = busy || !fullReady;
-    layoutNote.textContent = c.used_layout && layout.value === 'auto' ? 'auto picked: ' + ({ split: 'facecam + gameplay', crop: 'centre crop', blur: 'blurred background', bars: 'black bars' })[c.used_layout] : '';
+    layoutNote.textContent = [c.used_layout && layout.value === 'auto' ? 'auto picked: ' + ({ split: 'facecam + gameplay', crop: 'centre crop', blur: 'blurred background', bars: 'black bars' })[c.used_layout] : '',
+      c.layout_note || ''].filter(Boolean).join('. ');
+    if (c.song && c.song !== song.value && !c.song.startsWith('auto:') && song.value.startsWith('auto:')) songOptions(song, c.song);   // show the song auto picked
 
     const yt = c.youtube;
     const ytBusy = yt && ['queued', 'uploading', 'scheduled', 'uploaded'].includes(yt.status);
@@ -534,6 +605,23 @@ function buildEffects(job, clip, getRange, video) {
   const note = h('p', { class: 'hint' });
   const changed = () => { touched = true; };
 
+  // Which sounds the automatic effects use, and optional fixed sounds per kind of effect.
+  const source = h('select', {}, h('option', { value: 'auto' }, 'My sounds first'), h('option', { value: 'mine' }, 'Only my sounds'),
+    h('option', { value: 'builtin' }, 'Only built-in sounds'));
+  source.value = clip.sfx_source || state.settings.sfx_source || 'auto';
+  const ROLE_LABELS = { intro: 'Start of the clip', hit: 'Loud hits', big: 'Biggest hit', transition: 'Transitions (whip blur)', ending: 'Ending', emoji: 'Emoji pop-ups' };
+  const fixed = { ...(clip.sfx_fixed || {}) };
+  const roleSelects = Object.entries(ROLE_LABELS).map(([role, label]) => {
+    const sel = h('select', {});
+    soundOptions(sel, fixed[role] || '');
+    sel.options[0].textContent = 'Auto (fits the moment)';
+    sel.addEventListener('change', () => { if (sel.value) fixed[role] = sel.value; else delete fixed[role]; suggest(); });
+    return h('label', { class: 'field' }, h('span', {}, label), sel);
+  });
+  const fixedBox = h('details', { class: 'fx-fixed' }, h('summary', { class: 'hint' }, 'Always use a particular sound for…'),
+    h('div', { class: 'grid3' }, ...roleSelects));
+  source.addEventListener('change', () => suggest());
+
   function row(e) {
     const t = h('input', { type: 'number', min: 0, step: 0.1, value: e.t, title: 'Seconds from the start of the Short' });
     t.addEventListener('change', () => { e.t = Math.max(0, +t.value || 0); changed(); });
@@ -561,7 +649,7 @@ function buildEffects(job, clip, getRange, video) {
   }
   async function suggest() {
     try {
-      const r = await api(`/api/jobs/${job.id}/clips/${clip.id}/effects/suggest`, { body: { preset: preset.value, ...getRange() } });
+      const r = await api(`/api/jobs/${job.id}/clips/${clip.id}/effects/suggest`, { body: { preset: preset.value, ...getRange(), sfx_source: source.value, sfx_fixed: fixed } });
       events = r.effects; filter.value = r.filter; touched = true; draw();
     } catch (err) { toast(err.message, true); }
   }
@@ -577,7 +665,9 @@ function buildEffects(job, clip, getRange, video) {
     h('div', { class: 'grid3' },
       h('label', { class: 'field' }, h('span', {}, 'Style (fills in the list below)'), preset),
       h('label', { class: 'field' }, h('span', {}, 'Colour filter'), filter),
-      h('label', { class: 'field' }, h('span', {}, 'Sound effects volume'), vol)),
+      h('label', { class: 'field' }, h('span', {}, 'Sound effects volume'), vol),
+      h('label', { class: 'field' }, h('span', {}, 'Sounds to use'), source)),
+    fixedBox,
     h('div', { class: 'fx-head hint' }, h('span', {}, 'Time (s)'), h('span', {}, 'Visual effect'), h('span', {}, 'Sound')),
     list,
     h('div', { class: 'fx-actions' }, add, h('button', { onclick: suggest }, 'Suggest again'),
@@ -589,6 +679,7 @@ function buildEffects(job, clip, getRange, video) {
     el,
     resuggest: () => { if (touched || clip.effects != null) suggest(); },
     value: () => ({ effects_preset: preset.value, filter: filter.value, sfx_volume: +vol.value,
+      sfx_source: source.value, sfx_fixed: { ...fixed },
       effects: touched || clip.effects != null ? events.map(({ t, fx, sound, emoji }) => ({ t, fx, sound, emoji })) : undefined }),
     sync(c) {
       if (!touched && c.effects && JSON.stringify(c.effects) !== JSON.stringify(events)) {
@@ -682,7 +773,30 @@ $('#open-sfx-folder').onclick = () => api('/api/open-folder', { body: { which: '
 // ---------- settings ----------
 const FIELDS = ['clip_count', 'min_len', 'max_len', 'default_layout', 'default_zoom', 'caption_style', 'custom_base_url',
   'highlight', 'max_height', 'progress_bar', 'whisper_model', 'language', 'audd_api_key', 'jamendo_client_id',
-  'schedule_times', 'youtube_privacy', 'effects_preset', 'sfx_volume', 'channel_name', 'channel_handle', 'channel_avatar', 'tighten', 'cold_open', 'live_min_score', 'live_auto_render'];
+  'schedule_times', 'youtube_privacy', 'effects_preset', 'sfx_volume', 'channel_name', 'channel_handle', 'channel_avatar', 'tighten', 'cold_open', 'live_min_score', 'live_auto_render',
+  'sfx_source', 'default_song', 'default_template', 'encoder', 'parallel_renders'];
+
+function showTemplateList() {
+  const list = (state.tpl && state.tpl.templates) || [];
+  $('#template-list').replaceChildren(...(list.length ? list.map((t) => h('div', { class: 'track' },
+    h('div', { class: 'grow' }, h('div', {}, t.name), h('div', { class: 'hint' }, describeStyle(t.style))),
+    h('button', { class: 'danger', type: 'button', onclick: async () => {
+      if (!confirm(`Delete the template "${t.name}"? Videos already made with it keep their look.`)) return;
+      state.tpl = await api('/api/templates/' + t.id, { method: 'DELETE' });
+      await loadTemplates();
+      fillTemplateSelect($('#s-default_template'), state.tpl.default, 'None (use the settings above)');
+      showTemplateList();
+    } }, 'Delete'))) : [h('p', { class: 'hint' }, 'No templates yet.')]));
+}
+
+function describeStyle(s) {
+  const framing = { bars: 'black bars', blur: 'blurred background', auto: 'auto framing', crop: 'full-screen crop', split: 'facecam + gameplay', story: 'story card' };
+  const corner = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right' };
+  const song = !s.song ? 'no song' : s.song.startsWith('auto:') ? 'auto song' : 'song: ' + s.song.split('/').pop().replace(/\.\w+$/, '');
+  return [framing[s.layout] || s.layout, s.layout === 'split' && corner[s.cam_pos] ? `facecam ${corner[s.cam_pos]}` : '',
+    s.caption_style && s.caption_style + ' captions', s.effects_preset && s.effects_preset + ' effects',
+    s.sfx_source === 'builtin' ? 'built-in sounds' : 'my sounds', song].filter(Boolean).join(' · ');
+}
 
 // Connected AI: one key and model per provider. Typed values are kept per provider while switching,
 // so trying a different provider doesn't wipe what was entered for the first.
@@ -769,6 +883,9 @@ $('#yt-disconnect').onclick = async () => showYouTube(await api('/api/youtube/di
 
 function fillSettings(s) {
   state.settings = s;
+  songSelectOptions($('#s-default_song'), s.default_song, true);
+  fillTemplateSelect($('#s-default_template'), s.default_template, 'None (use the settings above)');
+  showTemplateList();
   for (const f of FIELDS) {
     const el = $('#s-' + f);
     if (el.type === 'checkbox') el.checked = !!s[f];
@@ -776,6 +893,9 @@ function fillSettings(s) {
     else el.value = s[f] ?? '';
   }
   $('#s-audd_api_key').placeholder = s.has_audd_key ? 'saved – type to replace' : 'optional';
+  $('#encoder-state').textContent = `Videos are encoded on: ${s.encoder_used || 'CPU'}.` +
+    (s.encoder !== 'auto' && s.encoder_used && !s.encoder_used.startsWith({ nvenc: 'NVIDIA', amf: 'AMD', qsv: 'Intel', mf: 'GPU', cpu: 'CPU' }[s.encoder] || '?')
+      ? ' The encoder you picked does not work on this PC, so the automatic choice is used.' : '');
   $('#gpu-note').textContent = s.gpu_note || '';
   $('#gpu-note').hidden = !s.gpu_note;
   drafts = {};
@@ -787,6 +907,8 @@ function fillSettings(s) {
 }
 
 $('#open-settings').onclick = async () => {
+  await loadTemplates();
+  try { state.tracks = (await api('/api/music')).tracks; } catch {}
   fillSettings(await api('/api/settings'));
   showYouTube(await api('/api/youtube'));
   $('#settings').showModal();
@@ -799,6 +921,7 @@ $('#settings-save').onclick = async () => {
     patch[f] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? +el.value : el.value.trim();
   }
   patch.max_height = +patch.max_height;
+  patch.parallel_renders = +patch.parallel_renders;
   if (patch.min_len >= patch.max_len) return toast('Shortest must be less than longest', true);
   stashDraft();
   const chosen = $('#ai-provider').value;
@@ -812,6 +935,7 @@ $('#settings-save').onclick = async () => {
     }
     const mine = drafts[chosen] || {};
     const s = await api('/api/settings', { body: { ...patch, ai_key: mine.key, ai_model: mine.model } });
+    await loadTemplates();
     fillSettings(s);
     $('#settings').close();
     toast(s.scorer === 'ai' && !s.ai_ready ? `Saved, but the connected AI isn't ready: ${s.ai_status}.` : 'Settings saved', s.scorer === 'ai' && !s.ai_ready);
@@ -898,6 +1022,8 @@ $('#results-close').onclick = () => $('#results').close();
 // ---------- boot ----------
 (async () => {
   try { state.tracks = (await api('/api/music')).tracks; } catch {}
+  try { state.settings = await api('/api/settings'); } catch {}
+  await loadTemplates();
   await loadEffects();
   await refreshJobs();
 })();

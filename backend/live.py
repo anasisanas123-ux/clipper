@@ -16,7 +16,7 @@ import time
 
 import numpy as np
 
-from . import ai, audio, config, jobs, moments, providers, sources, transcribe
+from . import ai, audio, config, engine, jobs, moments, providers, sources, transcribe
 
 log = logging.getLogger("clipper")
 CHUNK = 120            # seconds per recorded piece
@@ -257,18 +257,22 @@ def _find(s, final=False):
     if len(zw) < settings["min_len"]:
         return
     kind = job.get("kind", "irl")
-    found = moments.find_candidates(zw, segs, settings, limit=4, kind=kind)
+    local = found = moments.find_candidates(zw, segs, settings, limit=4, kind=kind)
     ready, _ = providers.readiness(settings)
+    used_ai = False
     if ready and segs:
         try:
             picked, info = ai.pick_moments(segs, zw, dict(job, duration=len(zw)), settings, 2, found)
             if picked:
-                found, job["ai"] = picked, info
+                found, job["ai"], used_ai = picked, info, True
         except Exception as e:
             log.warning("[%s] live AI scoring failed: %s", job["id"], e)
             note = f"{providers.label(settings['ai_provider'])} failed on a live piece, so the built-in algorithm scored it."
             if note not in job["warnings"]:
                 job["warnings"].append(note)
+    # the same combined scoring and title check as for whole videos (without the extra judging call)
+    found = engine.fuse(found, local, zw, segs, settings, kind, providers.label(settings["ai_provider"]))
+    engine.fix_titles(found, job, settings, used_ai)
     limit_end = end - (0 if final else TAIL)
     floor = int(settings.get("live_min_score", 60))
     for m in sorted(found, key=lambda m: -m["score"]):
@@ -311,7 +315,7 @@ def _cut(pieces, d, s0, s1, out):
     try:
         config.run_ffmpeg(["-f", "concat", "-safe", "0", "-i", lst.name, "-ss", f"{max(0, off):.3f}",
                            "-t", f"{s1 - s0:.3f}", "-map", "0:v:0", "-map", "0:a:0?",
-                           "-c:v", *config.video_encoder(), *config.quality_args(18), "-pix_fmt", "yuv420p",
+                           "-c:v", *config.video_encoder(), *config.quality_args(18), "-pix_fmt", config.pix_fmt(),
                            "-c:a", "aac", "-b:a", "192k", str(out)], cwd=str(d / "live"), timeout=900)
     finally:
         lst.unlink(missing_ok=True)

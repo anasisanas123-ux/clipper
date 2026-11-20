@@ -5,52 +5,86 @@ import numpy as np
 TOP_H, BOT_H = 672, 1248   # split layout: facecam panel over gameplay panel (sums to 1920)
 
 
+CORNERS = ("tl", "tr", "bl", "br")
+
+
+def _cam_box(W, H, cx, cy, fw):
+    """A box with the facecam panel's shape around a face, pushed flush against the frame edges it is close to,
+    because webcam overlays sit in a corner or along an edge. Wide enough to show the whole webcam, not just
+    the face."""
+    aspect = 1080 / TOP_H
+    cw = min(W, max(fw * 4.2, W * 0.22))
+    ch = cw / aspect
+    if ch > H:
+        ch = H
+        cw = ch * aspect
+    x = float(np.clip(cx - cw / 2, 0, W - cw))
+    y = float(np.clip(cy - ch * 0.45, 0, H - ch))
+    if x < W * 0.06:
+        x = 0.0
+    elif W - (x + cw) < W * 0.06:
+        x = W - cw
+    if y < H * 0.08:
+        y = 0.0
+    elif H - (y + ch) < H * 0.08:
+        y = H - ch
+    return {"x": int(x) // 2 * 2, "y": int(y) // 2 * 2, "w": int(cw) // 2 * 2, "h": int(ch) // 2 * 2}
+
+
+def corner_box(W, H, corner: str, size: float = 0.3) -> dict:
+    """A facecam box `size` x the frame width, tucked into the corner the user chose."""
+    aspect = 1080 / TOP_H
+    cw = int(W * size) // 2 * 2
+    ch = min(H, int(cw / aspect)) // 2 * 2
+    x = 0 if corner in ("tl", "bl") else W - cw
+    y = 0 if corner in ("tl", "tr") else H - ch
+    return {"x": x, "y": y, "w": cw, "h": ch}
+
+
 def detect(video_path) -> dict:
     cap = cv2.VideoCapture(str(video_path))
     W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    info = {"layout": "blur", "width": W, "height": H, "cam": None, "face_x": None}
+    info = {"layout": "blur", "width": W, "height": H, "cam": None, "face_x": None, "cam_conf": 0.0}
     if not W or not H or total < 2:
         cap.release()
         return info
     cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    samples, faces = 12, []
+    samples, faces = 24, []
     for i in range(samples):
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(total * (i + 0.5) / samples))
         ok, frame = cap.read()
         if not ok:
             continue
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        found = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=6,
-                                         minSize=(int(H * 0.05), int(H * 0.05)))
-        if len(found):
-            faces.append(max(found, key=lambda f: f[2] * f[3]))   # biggest face in the frame
+        gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        found = cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=5,
+                                         minSize=(int(H * 0.04), int(H * 0.04)))
+        faces.extend(list(found))     # every face: the facecam and a face inside the game can both show up
     cap.release()
-    if len(faces) < samples * 0.4:
+    if not faces:
         return info
     f = np.array(faces, dtype=float)
-    cx, cy = np.median(f[:, 0] + f[:, 2] / 2), np.median(f[:, 1] + f[:, 3] / 2)
-    # Keep only detections that agree on where the face is; a webcam overlay doesn't move.
-    near = f[(np.abs(f[:, 0] + f[:, 2] / 2 - cx) < W * 0.08) & (np.abs(f[:, 1] + f[:, 3] / 2 - cy) < H * 0.1)]
-    if len(near) < samples * 0.3:
+    centres = np.stack([f[:, 0] + f[:, 2] / 2, f[:, 1] + f[:, 3] / 2], axis=1)
+    # A webcam overlay doesn't move, so the face seen most often in the same spot is the streamer's.
+    best, best_n = None, 0
+    for c in centres:
+        near = (np.abs(centres[:, 0] - c[0]) < W * 0.06) & (np.abs(centres[:, 1] - c[1]) < H * 0.08)
+        if near.sum() > best_n:
+            best, best_n = near, int(near.sum())
+    if best_n < samples * 0.2:        # streamers look away; a face in a fifth of the frames is enough
         return info
-    fw, fh = float(np.median(near[:, 2])), float(np.median(near[:, 3]))
-    info["face_x"] = float(cx)
-    # A webcam overlay is small AND tucked into a corner of the frame. A face anywhere else is just the person
+    near = f[best]
+    cx = float(np.median(near[:, 0] + near[:, 2] / 2))
+    cy = float(np.median(near[:, 1] + near[:, 3] / 2))
+    fw = float(np.median(near[:, 2]))
+    info["face_x"] = cx
+    info["cam_conf"] = round(min(1.0, best_n / samples), 2)
+    # Always kept, so "Facecam + gameplay" works even when Auto would have picked a different framing.
+    info["cam"] = _cam_box(W, H, cx, cy, fw)
+    # For Auto: a webcam overlay is small AND tucked into a corner. A big face, or one anywhere else, is the person
     # in the shot (IRL, podcast, vlog), and splitting would show the same scene twice.
-    in_corner = (min(cx, W - cx) < W * 0.3) and (min(cy, H - cy) < H * 0.35)
-    if fw >= W * 0.16 or not in_corner:
-        info["layout"] = "crop"
-        return info
-    # Small face in a corner = webcam overlay. Grow the face box into a panel-shaped box around it.
-    aspect = 1080 / TOP_H
-    ch = min(H, fh * 2.8)
-    cw = min(W, ch * aspect)
-    ch = cw / aspect
-    x = float(np.clip(cx - cw / 2, 0, W - cw))
-    y = float(np.clip(cy - ch * 0.45, 0, H - ch))
-    info["layout"] = "split"
-    info["cam"] = {"x": int(x), "y": int(y), "w": int(cw) // 2 * 2, "h": int(ch) // 2 * 2}
+    in_corner = min(cx, W - cx) < W * 0.32 and min(cy, H - cy) < H * 0.36
+    info["layout"] = "split" if fw < W * 0.16 and in_corner else "crop"
     return info
 
 

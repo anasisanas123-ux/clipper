@@ -51,6 +51,26 @@ def resolve(track_id: str):
     return path, next((t for t in library() if t["id"] == track_id), None)
 
 
+AUTO_SONG = {"auto:mood": "Auto: a song matching each clip's mood", "auto:rotate": "Auto: rotate through my songs"}
+
+
+def pick(mode: str, mood: str = "", index: int = 0) -> str:
+    """A concrete track id for a clip. `mode` is a track id (kept if it still exists), "" (no song), or
+    "auto:mood" / "auto:rotate", which choose from your songs and the downloaded library."""
+    if not mode:
+        return ""
+    tracks = library()
+    if not mode.startswith("auto:"):
+        return mode if any(t["id"] == mode for t in tracks) else ""
+    if not tracks:
+        return ""
+    if mode == "auto:mood":
+        matching = [t for t in tracks if mood and t.get("mood") == mood]
+        if matching:
+            tracks = matching
+    return tracks[index % len(tracks)]["id"]
+
+
 def _openverse(query: str) -> list:
     r = httpx.get("https://api.openverse.org/v1/audio/", headers=UA, timeout=20, params={
         "q": query, "category": "music", "license": "by,cc0,pdm", "page_size": 20})

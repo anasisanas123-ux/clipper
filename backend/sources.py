@@ -184,6 +184,6 @@ def download_segment(source: dict, start: float, end: float, out: Path) -> None:
         args += [*http, *seek, "-i", source["audio_url"]]
         amap = ["-map", "1:a:0"]
     args += ["-t", f"{end - start:.3f}", "-map", "0:v:0", *amap,
-             "-c:v", *config.video_encoder(), *config.quality_args(18), "-pix_fmt", "yuv420p",
+             "-c:v", *config.video_encoder(), *config.quality_args(18), "-pix_fmt", config.pix_fmt(),
              "-c:a", "aac", "-b:a", "192k", out]
     config.run_ffmpeg(args, timeout=1800)

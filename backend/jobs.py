@@ -12,14 +12,16 @@ from pathlib import Path
 
 import numpy as np
 
-from . import ai, audio, config, copyright, effects, timeline, layout, moments, music, providers, render, sources, transcribe, youtube
+from . import (ai, audio, config, copyright, effects, engine, timeline, layout, moments, music, providers, render,
+               sources, templates, transcribe, youtube)
 
 log = logging.getLogger("clipper")
 KINDS = ("irl", "gaming", "film", "podcast")
 
 _jobs: dict = {}
 _lock = threading.RLock()
-_tasks: queue.Queue = queue.Queue()
+_tasks: queue.Queue = queue.Queue()          # analysis and uploads, one at a time
+_render_tasks: queue.Queue = queue.Queue()   # renders and previews, several at once
 _sources: dict = {}     # job id -> (fetched_at, hi-res source), refreshed because the links expire
 PAD = 3.0               # spare seconds kept on each side of a clip so trims don't need a re-download
 
@@ -29,8 +31,23 @@ def _dir(job_id):
 
 
 def _save(job):
+    # Clips of one video render at the same time, so another thread may change the job while it is being
+    # written out: retry the snapshot, and replace the file in one step so a reader never sees half of it.
     with _lock:
-        (_dir(job["id"]) / "job.json").write_text(json.dumps(job, indent=1), "utf-8")
+        for attempt in range(5):
+            try:
+                text = json.dumps(job, indent=1)
+                break
+            except RuntimeError:
+                time.sleep(0.02)
+        else:
+            return
+        f = _dir(job["id"]) / "job.json"
+        if not f.parent.exists():
+            return
+        tmp = f.with_suffix(".json.tmp")
+        tmp.write_text(text, "utf-8")
+        tmp.replace(f)
 
 
 def load_all():
@@ -68,11 +85,15 @@ def get(job_id):
     return _jobs.get(job_id)
 
 
-def create(url: str, kind: str = "irl", topic: str = "") -> dict:
+def create(url: str, kind: str = "irl", topic: str = "", template=None) -> dict:
+    """template: a template id, "" for the plain Settings defaults, or None for the default template."""
+    if template is None:
+        template = config.load_settings().get("default_template") or ""
     job = {"id": uuid.uuid4().hex[:10], "url": url.strip(),
            "kind": kind if kind in KINDS else "irl", "topic": topic.strip()[:80], "title": "", "streamer": "", "duration": None,
            "status": "analyzing", "stage": "Queued", "progress": 0.0, "created": time.time(),
-           "error": None, "warnings": [], "ai": None, "engine": None, "clips": []}
+           "error": None, "warnings": [], "ai": None, "engine": None, "clips": [],
+           "template": template if templates.get(template) else ""}
     _dir(job["id"]).mkdir(parents=True)
     with _lock:
         _jobs[job["id"]] = job
@@ -99,7 +120,7 @@ def queue_render(job_id, clip_id, patch=None, preview=False):
         old_start = clip["start"]
         for k in ("layout", "zoom", "caption_style", "highlight", "hook", "context", "title", "hashtags", "song", "music_volume",
                   "progress_bar", "start", "end", "effects_preset", "filter", "effects", "sfx_volume", "story", "comment",
-                  "tighten", "cold_open", "track_face", "beat_sync"):
+                  "tighten", "cold_open", "track_face", "beat_sync", "cam_pos", "split_game", "sfx_source", "sfx_fixed"):
             if patch and k in patch and patch[k] is not None:
                 clip[k] = patch[k]
         if clip.get("effects") and clip["start"] != old_start:
@@ -113,7 +134,7 @@ def queue_render(job_id, clip_id, patch=None, preview=False):
             clip["end"] = min(clip["end"], job["duration"])
         clip["status"], clip["error"] = "queued", None
     _save(job)
-    _tasks.put(("preview" if preview else "render", job_id, clip_id))
+    _render_tasks.put(("preview" if preview else "render", job_id, clip_id))
     return clip
 
 
@@ -180,28 +201,8 @@ def _analyze(job):
     n = int(settings["clip_count"])
     _stage(job, "Finding the best moments")
     short = duration <= settings["max_len"] + 10
-    if short:
-        # An already-cut clip: keep it whole and just score it.
-        found = [moments.whole_clip(z, segments, duration, job["kind"])]
-    else:
-        found = moments.find_candidates(z, segments, settings, limit=max(12, n * 2), kind=job["kind"])
-    ready, why = providers.readiness(settings)
-    if settings.get("scorer") == "ai" and not ready:
-        job["warnings"].append(f"Connected AI is selected but not set up ({why}), so the built-in algorithm "
-                               f"scored this video. Finish the setup in Settings.")
-    if ready and segments:
-        name = providers.label(settings["ai_provider"])
-        _stage(job, f"{name} is reading the transcript")
-        try:
-            picked, info = ai.pick_moments(segments, z, job, settings, 1 if short else n + 3, found, whole=short)
-            if picked:
-                found, job["ai"] = picked, info
-            else:
-                job["warnings"].append(f"{name} found no moments worth clipping; showing the built-in picks instead.")
-        except Exception as e:
-            log.exception("[%s] AI scoring failed", job["id"])
-            job["warnings"].append(f"{name} step failed, so the built-in algorithm was used instead. "
-                                   f"{providers.friendly(e, settings['ai_provider'])}")
+    found, job["ai"], notes = engine.find(job, segments, z, settings, n, short, lambda text: _stage(job, text))
+    job["warnings"] += notes
     if not found:
         raise RuntimeError("No usable moments found (the video may be silent or too short).")
 
@@ -216,16 +217,12 @@ def _analyze(job):
 
 
 def init_clip(job, m, cid, settings):
-    """Fills in a newly found moment's editing settings from the defaults."""
-    m.update(id=cid, status="idle", error=None, version=0, layout=settings.get("default_layout") or "bars",
-             zoom=settings.get("default_zoom") or 73, layout_info=None,
-             caption_style=settings["caption_style"], highlight=settings["highlight"],
-             progress_bar=settings["progress_bar"], song="", music_volume=settings["music_volume"],
+    """Fills in a newly found moment's editing settings from the video's template (or the Settings defaults)."""
+    style = templates.style_for(settings, job.get("template", ""))
+    _apply_look(m, style, int(cid.lstrip("c") or 1) - 1)
+    m.update(id=cid, status="idle", error=None, version=0, layout_info=None,
              copyright=None, src_start=m.get("src_start"), src_end=m.get("src_end"), youtube=None,
-             effects_preset=settings.get("effects_preset") or "edit", filter=None, effects=None,
-             sfx_volume=settings.get("sfx_volume", 0.7), tighten=settings.get("tighten", True),
-             cold_open=settings.get("cold_open", False), track_face=True, beat_sync=True,
-             showing=None, preview_version=0)
+             effects=None, showing=None, preview_version=0)
     if not m.get("hashtags"):
         m["hashtags"] = moments.make_hashtags(job, m)
     if not m.get("context"):
@@ -236,6 +233,7 @@ def init_clip(job, m, cid, settings):
 
 
 _hd_threads: dict = {}
+_hd_lock = threading.Lock()
 
 
 def _start_hd_download(job, settings):
@@ -265,10 +263,11 @@ def _start_hd_download(job, settings):
 
 def _wait_for_hd(job, step):
     """Blocks a render until the background HD download is finished, showing its progress."""
-    hd = job.get("hd") or {}
-    if hd.get("status") in (None, "error") and not (_dir(job["id"]) / "source.mp4").exists():
-        # Not started (app restarted) or failed earlier: try again now.
-        _start_hd_download(job, config.load_settings())
+    with _hd_lock:          # two clips rendering at once must not both start the download
+        hd = job.get("hd") or {}
+        if hd.get("status") in (None, "error") and not (_dir(job["id"]) / "source.mp4").exists():
+            # Not started (app restarted) or failed earlier: try again now.
+            _start_hd_download(job, config.load_settings())
     t = _hd_threads.get(job["id"])
     while t and t.is_alive():
         step(f"Waiting for the HD video to download ({job['hd']['progress'] * 100:.0f}%)")
@@ -327,10 +326,14 @@ def _render(job, clip, preview=False):
     if not clip.get("layout_info"):
         step("Looking for the facecam")
         clip["layout_info"] = layout.detect(src)
+        _remember_cam(job, clip["layout_info"])
     chosen = clip["layout"] if clip["layout"] != "auto" else clip["layout_info"]["layout"]
     if clip["layout"] == "auto" and job.get("kind") == "podcast" and chosen == "split":
         # A small face in a podcast is a wide studio shot, not a webcam over gameplay: crop on the speaker.
         chosen = "crop"
+    if clip["layout"] == "auto" and chosen != "split" and job.get("kind") == "gaming" and (job.get("cam") or {}).get("box"):
+        # The facecam wasn't seen in this clip, but it was in others from the same stream: it hasn't moved.
+        chosen = "split"
 
     env_file = d / f"{cid}_env.npy"
     if not words_file.exists() or not env_file.exists():
@@ -345,6 +348,8 @@ def _render(job, clip, preview=False):
 
     trim_start = clip["start"] - clip["src_start"]
     trim_end = clip["end"] - clip["src_start"]
+    if (clip.get("song") or "").startswith("auto:"):
+        clip["song"] = music.pick(clip["song"], clip.get("mood", ""), int(cid.lstrip("c") or 1) - 1)
     ctx = _clip_context(job, clip)
     song_path, song_entry = music.resolve(clip.get("song") or "")
     if clip.get("effects") is None:
@@ -366,6 +371,10 @@ def _render(job, clip, preview=False):
     else:
         r_src, r_start, r_end, r_words = src, trim_start, trim_end, words
     lay = dict(clip["layout_info"])
+    clip["layout_note"] = ""
+    if chosen == "split":
+        lay["cam"], clip["layout_note"] = _split_cam(job, clip, lay)
+        lay["split_game"] = clip.get("split_game") or "fill"
     if (clip.get("track_face", True) and chosen in ("crop", "bars", "blur", "story")
             and lay.get("face_x") and lay.get("layout") != "split"):
         step("Following the face")
@@ -398,6 +407,66 @@ def _render(job, clip, preview=False):
         cut.unlink(missing_ok=True)
     clip.update(status="ready", step="", used_layout=chosen, showing="full", version=clip.get("version", 0) + 1)
     _save(job)
+
+
+def _remember_cam(job, info):
+    """Keeps the most confidently found facecam of the whole video. A webcam overlay stays in one place for the
+    stream, so a clip where the face wasn't visible can use the spot found in another clip."""
+    cam, conf = info.get("cam"), info.get("cam_conf") or 0
+    if not cam or info.get("layout") != "split" or conf < 0.3:
+        return
+    old = job.get("cam") or {}
+    if conf > old.get("conf", 0):
+        job["cam"] = {"box": cam, "conf": conf, "width": info["width"], "height": info["height"]}
+
+
+def _split_cam(job, clip, lay):
+    """The facecam box for the 'Facecam top, gameplay bottom' framing, and a note when it had to be guessed.
+    Never falls back to a different framing: the clip always comes out split."""
+    W, H = lay["width"], lay["height"]
+    pos = clip.get("cam_pos") or "auto"
+    if pos in layout.CORNERS:
+        return layout.corner_box(W, H, pos), ""
+    if lay.get("cam") and (lay.get("cam_conf") or 0) >= 0.3 and lay.get("layout") == "split":
+        return lay["cam"], ""
+    remembered = job.get("cam") or {}
+    if remembered.get("box") and remembered.get("width") == W and remembered.get("height") == H:
+        return remembered["box"], ""
+    if lay.get("cam"):
+        return lay["cam"], ""
+    return (layout.corner_box(W, H, "tl"),
+            "No facecam found, so the top-left corner is used. Pick the facecam's corner under Framing.")
+
+
+def _apply_look(clip, style, index=0):
+    """Puts a template's (or the defaults') look on a clip. An automatic song choice becomes a concrete track."""
+    for k in templates.KEYS:
+        if k in style:
+            clip[k] = json.loads(json.dumps(style[k]))
+    clip["song"] = music.pick(style.get("song") or "", clip.get("mood", ""), index)
+
+
+def apply_template(job_id, template_id) -> int:
+    """Gives every clip in the video a template's look and re-renders the ones already rendered or queued."""
+    job = _jobs[job_id]
+    t = templates.get(template_id)
+    if not t:
+        raise ValueError("That template no longer exists")
+    style = templates.style_for(config.load_settings(), template_id)
+    count = 0
+    with _lock:
+        job["template"] = template_id
+    for i, c in enumerate(job["clips"]):
+        if c["status"] in ("queued", "rendering"):
+            continue
+        with _lock:
+            _apply_look(c, style, i)
+            c["effects"] = None          # placed again on this clip's own moments, with the template's sounds
+        if c.get("version", 0) > 0 or c.get("preview_version", 0) > 0 or c["status"] == "error":
+            queue_render(job_id, c["id"])
+            count += 1
+    _save(job)
+    return count
 
 
 def _clip_context(job, clip, start=None, end=None, tighten=None, cold_open=None, song=None):
@@ -437,18 +506,21 @@ def _excitement(job):
     return np.load(f) if f.exists() else None
 
 
-def suggest_effects(job, clip, preset, words=None, start=None, end=None, tighten=None, cold_open=None, song=None) -> dict:
+def suggest_effects(job, clip, preset, words=None, start=None, end=None, tighten=None, cold_open=None, song=None,
+                    sfx_source=None, sfx_fixed=None) -> dict:
     """Automatic effects for a clip (optionally for a draft start/end/options the user hasn't rendered yet),
-    timed on the finished Short."""
+    timed on the finished Short. Sounds come from your own folder first unless the clip says otherwise."""
     c = dict(clip, start=clip["start"] if start is None else float(start), end=clip["end"] if end is None else float(end))
     ctx = _clip_context(job, clip, start, end, tighten, cold_open, song)
+    snd = dict(sound_source=sfx_source or clip.get("sfx_source") or config.load_settings().get("sfx_source", "auto"),
+               sound_fixed=clip.get("sfx_fixed") if sfx_fixed is None else sfx_fixed)
     if ctx["words"] is not None:
         return effects.suggest(preset, c, _excitement(job), ctx["src_words"], ctx["offset"],
-                               env=ctx["env"], plan=ctx["plan"], beats=ctx["beats"])
+                               env=ctx["env"], plan=ctx["plan"], beats=ctx["beats"], **snd)
     # no word timings yet: use the transcript's sentence timings, which are on the video's timeline
     words = [{"start": seg["start"], "text": seg["text"]} for seg in moments_segments(job)
              if c["start"] <= seg["start"] < c["end"]]
-    return effects.suggest(preset, c, _excitement(job), words, c["start"], beats=ctx["beats"])
+    return effects.suggest(preset, c, _excitement(job), words, c["start"], beats=ctx["beats"], **snd)
 
 
 def moments_segments(job):
@@ -477,8 +549,7 @@ def export(job_id, clip_id) -> str:
     return str(out)
 
 
-STYLE_KEYS = ("layout", "zoom", "caption_style", "highlight", "progress_bar", "song", "music_volume",
-              "effects_preset", "filter", "sfx_volume", "tighten", "cold_open", "track_face", "beat_sync")
+STYLE_KEYS = templates.KEYS
 
 
 def apply_style(job_id, clip_id) -> int:
@@ -596,6 +667,47 @@ def _upload(job, clip):
     _save(job)
 
 
+MAX_RENDER_WORKERS = 3
+_render_gate = threading.Condition()
+_rendering: set = set()        # (job id, clip id) being rendered right now
+
+
+def _parallel_limit() -> int:
+    try:
+        return max(1, min(MAX_RENDER_WORKERS, int(config.load_settings().get("parallel_renders", 2))))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _render_worker():
+    """Renders run on their own workers, several at once (Settings: clips rendered at the same time). A single
+    render leaves most CPU cores and the GPU encoder idle, so two at once finish a batch about a third sooner.
+    Speech recognition inside a render is still one at a time (transcribe.py holds a lock)."""
+    while True:
+        kind, job_id, clip_id = _render_tasks.get()
+        key = (job_id, clip_id)
+        with _render_gate:
+            # wait for a free slot, and never render the same clip twice at once
+            while len(_rendering) >= _parallel_limit() or key in _rendering:
+                _render_gate.wait(timeout=1.0)
+            _rendering.add(key)
+        try:
+            job = _jobs.get(job_id)
+            clip = next((c for c in job["clips"] if c["id"] == clip_id), None) if job else None
+            if clip:
+                try:
+                    _render(job, clip, preview=(kind == "preview"))
+                except Exception as e:
+                    log.exception("Task failed")
+                    clip["status"], clip["error"] = "error", str(e)[-600:]
+                    if job.get("status") != "deleted":
+                        _save(job)
+        finally:
+            with _render_gate:
+                _rendering.discard(key)
+                _render_gate.notify_all()
+
+
 def _worker():
     while True:
         kind, job_id, clip_id = _tasks.get()
@@ -607,14 +719,6 @@ def _worker():
                 _analyze(job)
             elif kind == "upload":
                 _upload(job, next(c for c in job["clips"] if c["id"] == clip_id))
-            else:
-                clip = next(c for c in job["clips"] if c["id"] == clip_id)
-                try:
-                    _render(job, clip, preview=(kind == "preview"))
-                except Exception as e:
-                    log.exception("Task failed")
-                    clip["status"], clip["error"] = "error", str(e)[-600:]
-                    _save(job)
         except Exception as e:
             log.exception("Task failed")
             log.error("[%s] %s failed: %s", job_id, kind, e)
@@ -639,3 +743,5 @@ def _friendly(e: Exception) -> str:
 def start():
     load_all()
     threading.Thread(target=_worker, daemon=True).start()
+    for _ in range(MAX_RENDER_WORKERS):
+        threading.Thread(target=_render_worker, daemon=True).start()

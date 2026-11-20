@@ -8,28 +8,39 @@ from .layout import BOT_H, TOP_H, x_expr
 DEFAULT_ZOOM = 73   # picture height as % of the screen in the bars/blurred layouts (about 1400 of 1920)
 
 
-def _video_chain(lay: dict, layout: str, zoom=None, box=None) -> str:
+def _video_chain(lay: dict, layout: str, zoom=None, box=None, look="") -> str:
+    """The framing. `look` is the colour grading, applied to each piece after it is cropped from the source and
+    before it is scaled up (fewer pixels to grade, so renders are much faster; colour doesn't depend on size)."""
     W, H = lay["width"], lay["height"]
+    lk = f"{look}," if look else ""
     if layout == "story":
         bw, bh = box["w"], box["h"]
         if W / H > bw / bh:
             cw, ch = int(H * bw / bh) // 2 * 2, H // 2 * 2
         else:
             cw, ch = W // 2 * 2, int(W * bh / bw) // 2 * 2
-        return f"[0:v]crop={cw}:{ch}:{_x(lay, cw)}:{(H - ch) // 2},scale={bw}:{bh},setsar=1[v0]"
+        return f"[0:v]crop={cw}:{ch}:{_x(lay, cw)}:{(H - ch) // 2},{lk}scale={bw}:{bh},setsar=1[v0]"
     if layout == "split" and lay.get("cam"):
         c = lay["cam"]
+        cam = f"[c0]crop={c['w']}:{c['h']}:{c['x']}:{c['y']},{lk}scale=1080:{TOP_H}[cam];"
+        if lay.get("split_game") == "fit":
+            # the whole game picture, full width, on a blurred copy of itself filling the rest of the panel
+            gh = min(BOT_H, int(1080 * H / W)) // 2 * 2
+            return (f"[0:v]split=3[c0][g0][b0];{cam}"
+                    f"[b0]{_blurred(1080, BOT_H, look)}[gbg];"
+                    f"[g0]scale=1080:{gh},{lk}null[gfg];"
+                    f"[gbg][gfg]overlay=0:{(BOT_H - gh) // 2}[game];"
+                    f"[cam][game]vstack[v0]")
         bw = min(W, int(H * 1080 / BOT_H) // 2 * 2)
-        return (f"[0:v]split[c0][g0];"
-                f"[c0]crop={c['w']}:{c['h']}:{c['x']}:{c['y']},scale=1080:{TOP_H}[cam];"
-                f"[g0]crop={bw}:{H}:{(W - bw) // 2}:0,scale=1080:{BOT_H}[game];"
+        return (f"[0:v]split[c0][g0];{cam}"
+                f"[g0]crop={bw}:{H}:{(W - bw) // 2}:0,{lk}scale=1080:{BOT_H}[game];"
                 f"[cam][game]vstack[v0]")
     if layout in ("bars", "blur"):
-        return _framed(lay, picture_height(lay, zoom), layout)
+        return _framed(lay, picture_height(lay, zoom), layout, look)
     if layout == "crop":
         cw = min(W, int(H * 9 / 16) // 2 * 2)
-        return f"[0:v]crop={cw}:{H}:{_x(lay, cw)}:0,scale=1080:1920[v0]"
-    return _framed(lay, picture_height(lay, zoom), "blur")
+        return f"[0:v]crop={cw}:{H}:{_x(lay, cw)}:0,{lk}scale=1080:1920[v0]"
+    return _framed(lay, picture_height(lay, zoom), "blur", look)
 
 
 def _x(lay: dict, cw: int) -> str:
@@ -52,7 +63,7 @@ def picture_height(lay: dict, zoom) -> int:
     return max(min(want, 1920), min(whole, 1920)) // 2 * 2
 
 
-def _framed(lay: dict, ph: int, bg: str) -> str:
+def _framed(lay: dict, ph: int, bg: str, look="") -> str:
     """The picture (1080 wide, ph tall) in the middle of the frame, cropped around the face when one was
     found. Above and below it: black, or a blurred, darkened, zoomed-in copy of the same video."""
     W, H = lay["width"], lay["height"]
@@ -64,14 +75,21 @@ def _framed(lay: dict, ph: int, bg: str) -> str:
     x = _x(lay, cw)
     y = (H - ch) // 2
     top = (1920 - ph) // 2
-    pic = f"crop={cw}:{ch}:{x}:{y},scale=1080:{ph}"
+    pic = f"crop={cw}:{ch}:{x}:{y},{look + ',' if look else ''}scale=1080:{ph}"
     if bg != "blur" or ph >= 1920:
         return f"[0:v]{pic},pad=1080:1920:0:{top}:black[v0]"
     return ("[0:v]split[b0][f0];"
-            "[b0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:3,"
-            "eq=brightness=-0.12[bg];"
+            f"[b0]{_blurred(1080, 1920, look)}[bg];"
             f"[f0]{pic}[fg];"
             f"[bg][fg]overlay=0:{top}[v0]")
+
+
+def _blurred(w: int, h: int, look="") -> str:
+    """A blurred, darkened copy of the video filling w x h. Blurred (and colour graded) at a quarter of the size
+    and scaled back up: the same soft look as a full-size blur, about 9 times faster."""
+    sw, sh = w // 4 // 2 * 2, h // 4 // 2 * 2
+    return (f"scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh},{look + ',' if look else ''}"
+            f"boxblur=8:2,scale={w}:{h}:flags=bilinear,eq=brightness=-0.12")
 
 
 def render(job_dir: Path, clip: dict, words: list, out: Path, music_path=None, preview=False) -> None:
@@ -103,7 +121,11 @@ def render(job_dir: Path, clip: dict, words: list, out: Path, music_path=None, p
                        layout, offset=clip["trim_start"], meme_text=clip.get("context", ""), picture=picture),
         "utf-8")
 
-    fc = [_video_chain(clip["layout_info"], layout, clip.get("zoom"), box)]
+    look, _ = effects.split_look(clip.get("filter") or "none")
+    fc = [_video_chain(clip["layout_info"], layout, clip.get("zoom"), box, look)]
+    # Keep the source in yuv420p: otherwise ffmpeg may move an RGB conversion for the colour filter up to the
+    # full source frame (single-threaded, every frame) instead of doing it on the small crop.
+    fc[0] = fc[0].replace("[0:v]", "[0:v]format=yuv420p,", 1)
     inputs = ["-ss", f"{clip['trim_start']:.3f}", "-t", f"{dur:.3f}", "-i", clip["src"]]
     n_in = 1
     music_in = None
@@ -135,7 +157,8 @@ def render(job_dir: Path, clip: dict, words: list, out: Path, music_path=None, p
             sfx.append((n_in, max(0.0, e["t"] - lead), min(lead, e["t"])))
             n_in += 1
     size = (box["w"], box["h"]) if box else (1080, 1920)
-    pieces, last = effects.video_filters("v0", clip.get("filter") or "none", events, dur, fps, emoji_inputs, size)
+    pieces, last = effects.video_filters("v0", clip.get("filter") or "none", events, dur, fps, emoji_inputs, size,
+                                         graded=True)
     fc += pieces
     if card:
         # black page, the video in its box, then the card (with a rounded hole) on top
@@ -174,8 +197,9 @@ def render(job_dir: Path, clip: dict, words: list, out: Path, music_path=None, p
     sv = float(clip.get("sfx_volume") if clip.get("sfx_volume") is not None else 0.7)
     for n, (k, at, skip) in enumerate(sfx):
         ms = int(at * 1000)
-        fc.append(f"[{k}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=start={skip:.3f},asetpts=PTS-STARTPTS,"
-                  f"volume={sv:.3f},adelay={ms}|{ms}[sx{n}]")
+        # long meme sounds are cut to 4 seconds with a short fade, so one doesn't play under the whole clip
+        fc.append(f"[{k}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=start={skip:.3f}:end={skip + 4:.3f},"
+                  f"asetpts=PTS-STARTPTS,afade=t=out:st=3.5:d=0.5,volume={sv:.3f},adelay={ms}|{ms}[sx{n}]")
         mix.append(f"sx{n}")
     if len(mix) > 1:
         fc.append("".join(f"[{m}]" for m in mix) +
@@ -186,7 +210,7 @@ def render(job_dir: Path, clip: dict, words: list, out: Path, music_path=None, p
     config.run_ffmpeg([
         *inputs, "-filter_complex", ";".join(fc), "-map", "[vout]", "-map", "[aout]",
         *(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "30"] if preview
-          else ["-c:v", *config.video_encoder(), *config.quality_args(21)]),
+          else ["-c:v", *config.video_encoder(), *config.quality_args(21), "-pix_fmt", config.pix_fmt()]),
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart",
         "-t", f"{dur:.3f}", str(out),
     ], cwd=str(job_dir), timeout=900)

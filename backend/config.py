@@ -37,6 +37,11 @@ DEFAULTS = {
     "progress_bar": True,
     "effects_preset": "edit",        # automatic effects style for new clips: none, subtle, edit, hype, cinematic
     "sfx_volume": 0.7,
+    "sfx_source": "auto",            # sounds for automatic effects: auto (yours when you have some), mine, builtin
+    "default_song": "",              # song for new clips: "", a track id, "auto:mood" or "auto:rotate"
+    "default_template": "",          # template every new video is made with ("" = the defaults above)
+    "encoder": "auto",               # video encoder: auto, nvenc, amf, qsv, mf (any GPU) or cpu
+    "parallel_renders": 2,           # clips rendered at the same time (2 finishes a batch about a third sooner)
     "tighten": True,                 # cut silent pauses out of new clips (jump cuts)
     "cold_open": False,
     "live_min_score": 60,            # live streams: only moments scoring at least this become clips
@@ -146,26 +151,43 @@ ENCODERS = {
     "amf": ("h264_amf", ["-quality", "balanced", "-rc", "cqp"],
             lambda q: ["-qp_i", str(q), "-qp_p", str(q + 2), "-qp_b", str(q + 4)], "AMD GPU"),
     "qsv": ("h264_qsv", ["-preset", "medium"], lambda q: ["-global_quality", str(q + 2)], "Intel graphics"),
+    # Windows' own hardware encoder layer: works with any GPU that has a video encoder (any maker), so it
+    # catches the cases above miss, e.g. a driver without the AMD or Intel runtime. hw_encoding refuses the
+    # software fallback, so it only counts as working when a GPU really does the encoding.
+    "mf": ("h264_mf", ["-hw_encoding", "1", "-rate_control", "quality"],
+           lambda q: ["-quality", str(int(max(1, min(100, 100 - (q - 10) * 2.5))))], "GPU (Windows Media Foundation)"),
 }
+ENCODER_CHOICES = {"auto": "Automatic (fastest that works)", "nvenc": "NVIDIA GPU", "amf": "AMD GPU",
+                   "qsv": "Intel graphics", "mf": "Any GPU (Windows Media Foundation)", "cpu": "CPU (slowest)"}
+_encoder_for = None    # the "encoder" setting the cached choice was made for
 
 
 def _try_encoder(key) -> str:
     """'' when the encoder works on this PC, otherwise ffmpeg's error."""
     name, opts, quality, _ = ENCODERS[key]
     try:
-        run_ffmpeg(["-f", "lavfi", "-i", "color=c=gray:s=640x360:d=0.3", "-c:v", name, *opts, *quality(21),
-                    "-pix_fmt", "yuv420p", "-f", "null", "-"], timeout=30)
+        run_ffmpeg(["-f", "lavfi", "-i", "color=c=gray:s=1080x1920:d=0.3", "-c:v", name, *opts, *quality(21),
+                    "-pix_fmt", "nv12" if key == "mf" else "yuv420p", "-f", "null", "-"], timeout=30)
         return ""
     except Exception as e:
         return str(e)
 
 
 def video_encoder() -> list:
-    """The fastest encoder that works here: NVIDIA, AMD or Intel hardware, otherwise x264 on the CPU."""
-    global _nvenc, gpu_note
+    """The encoder chosen in Settings, or the fastest that works here: NVIDIA, AMD or Intel hardware, then any
+    GPU through Windows Media Foundation, otherwise x264 on the CPU. A chosen encoder that doesn't work on this
+    PC falls back to the automatic choice."""
+    global _nvenc, gpu_note, _encoder_for
+    want = load_settings().get("encoder") or "auto"
+    if want != _encoder_for:
+        _nvenc, _encoder_for, gpu_note = None, want, ""
     if _nvenc is None:
         _nvenc = ""
-        for key in ENCODERS:
+        if want == "cpu":
+            return ["libx264", "-preset", "veryfast"]
+        if want in ENCODERS and not _try_encoder(want):
+            _nvenc = want
+        for key in ([] if _nvenc else ENCODERS):
             err = _try_encoder(key)
             if not err:
                 _nvenc = key
@@ -191,3 +213,10 @@ def encoder_label() -> str:
 def quality_args(q: int) -> list:
     video_encoder()
     return ENCODERS[_nvenc][2](q) if _nvenc else ["-crf", str(q)]
+
+
+def pix_fmt() -> str:
+    """Pixel format for the chosen encoder: Windows Media Foundation hardware encoders only take NV12 (the same
+    4:2:0 picture as yuv420p, laid out differently)."""
+    video_encoder()
+    return "nv12" if _nvenc == "mf" else "yuv420p"

@@ -11,7 +11,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import ai, config, effects, jobs, live, music, performance, providers, sources, updater, youtube
+from . import ai, config, effects, jobs, live, music, performance, providers, sources, templates, updater, youtube
 
 app = FastAPI(title="Clipper")
 
@@ -29,6 +29,7 @@ def _public_settings():
                       for p, v in providers.PROVIDERS.items()}
     config.video_encoder()
     s["gpu_note"] = config.gpu_note
+    s["encoder_used"] = config.encoder_label()
     return s
 
 
@@ -91,7 +92,46 @@ def create_job(body: dict = Body(...)):
             raise HTTPException(400, "That file type isn't supported. Use an mp4, mkv, mov, webm or similar video.")
     elif not re.match(r"https?://", url):
         raise HTTPException(400, "That isn't a link or a video file on this PC")
-    return jobs.create(url, body.get("kind") or "irl", body.get("topic") or "")
+    return jobs.create(url, body.get("kind") or "irl", body.get("topic") or "", body.get("template"))
+
+
+@app.get("/api/templates")
+def list_templates():
+    return {"templates": templates.all_templates(), "default": config.load_settings().get("default_template", ""),
+            "keys": list(templates.KEYS), "sound_roles": list(effects.SOUND_ROLES), "auto_songs": music.AUTO_SONG}
+
+
+@app.post("/api/templates")
+def save_template(body: dict = Body(...)):
+    """Saves a look as a template (same name = update). make_default also makes it the default for new videos."""
+    t = templates.save(body.get("name") or "", body.get("style") or {}, body.get("id"))
+    if body.get("make_default"):
+        config.save_settings({"default_template": t["id"]})
+    return list_templates() | {"saved": t}
+
+
+@app.post("/api/templates/default")
+def default_template(body: dict = Body(...)):
+    tid = body.get("id") or ""
+    if tid and not templates.get(tid):
+        raise HTTPException(404, "Template not found")
+    config.save_settings({"default_template": tid})
+    return list_templates()
+
+
+@app.delete("/api/templates/{tid}")
+def delete_template(tid: str):
+    templates.delete(tid)
+    return list_templates()
+
+
+@app.post("/api/jobs/{job_id}/apply-template")
+def apply_template(job_id: str, body: dict = Body(...)):
+    _job(job_id)
+    try:
+        return {"queued": jobs.apply_template(job_id, body.get("id") or "")}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 def _job(job_id):
@@ -127,7 +167,8 @@ def suggest_effects(job_id: str, clip_id: str, body: dict = Body(default={})):
     if not clip:
         raise HTTPException(404, "Clip not found")
     return jobs.suggest_effects(job, clip, body.get("preset") or "edit", start=body.get("start"), end=body.get("end"),
-                                tighten=body.get("tighten"), cold_open=body.get("cold_open"), song=body.get("song"))
+                                tighten=body.get("tighten"), cold_open=body.get("cold_open"), song=body.get("song"),
+                                sfx_source=body.get("sfx_source"), sfx_fixed=body.get("sfx_fixed"))
 
 
 def _clip(job, clip_id):
