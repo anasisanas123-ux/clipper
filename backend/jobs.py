@@ -450,6 +450,11 @@ def _split_cam(job, clip, lay):
     Never falls back to a different framing: the clip always comes out split."""
     W, H = lay["width"], lay["height"]
     pos = clip.get("cam_pos") or "auto"
+    if pos == "custom" or (pos == "auto" and job.get("cam_box")):
+        # marked by hand on this clip, or on another clip of the same video
+        box = layout.marked_box(W, H, (clip.get("cam_box") if pos == "custom" else None) or job.get("cam_box") or {})
+        if box:
+            return box, ""
     if pos in layout.CORNERS:
         return layout.corner_box(W, H, pos), ""
     if lay.get("cam") and (lay.get("cam_conf") or 0) >= 0.3 and lay.get("layout") == "split":
@@ -461,6 +466,58 @@ def _split_cam(job, clip, lay):
         return lay["cam"], ""
     return (layout.corner_box(W, H, "tl"),
             "No facecam found, so the top-left corner is used. Pick the facecam's corner under Framing.")
+
+
+def frame_jpeg(job, clip_id=None) -> bytes:
+    """One frame of the video (JPEG, 960 wide) to mark the facecam on: from the clip's own cut when it has been
+    rendered, else from the video itself (the file on disk, or a single frame fetched from the stream)."""
+    d = _dir(job["id"])
+    clips = job.get("clips") or []
+    clip = next((c for c in clips if c["id"] == clip_id), None) or (clips[0] if clips else None)
+    candidates = [c for c in ([clip] if clip else []) + clips if c and (d / f"{c['id']}_src.mp4").exists()]
+    if candidates:
+        c = candidates[0]
+        src = {"url": str(d / f"{c['id']}_src.mp4"), "audio_url": None, "headers": {}}
+        at = max(0.0, ((c["start"] + c["end"]) / 2) - (c.get("src_start") or 0))
+    else:
+        at = ((clip["start"] + clip["end"]) / 2) if clip else (job.get("duration") or 60) / 2
+        if job.get("local"):
+            src = {"url": job["url"], "audio_url": None, "headers": {}}
+        else:
+            src = _source(job, config.load_settings())
+    out = d / f"_frame_{uuid.uuid4().hex[:6]}.jpg"
+    http = sources.http_args(src.get("headers") or {}) if not sources.is_local(src["url"]) else []
+    try:
+        config.run_ffmpeg([*http, "-ss", f"{at:.2f}", "-i", src["url"], "-frames:v", "1", "-vf", "scale=960:-2",
+                           "-q:v", "3", str(out)], timeout=90)
+        return out.read_bytes()
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def set_cam(job_id, box: dict, clip_id=None, everywhere=True) -> int:
+    """Uses a facecam area marked by hand (shares of the frame) on one clip or every clip in the video, and
+    re-renders the ones already rendered with the facecam framing. Returns how many were queued."""
+    job = _jobs[job_id]
+    clean = templates.clean_style({"cam_pos": "custom", "cam_box": box})
+    if clean.get("cam_pos") != "custom":
+        raise ValueError("Draw a box around the facecam first")
+    count = 0
+    for c in job["clips"]:
+        if not everywhere and c["id"] != clip_id:
+            continue
+        with _lock:
+            c["cam_pos"], c["cam_box"] = "custom", clean["cam_box"]
+        split = c.get("layout") == "split" or (c.get("layout") == "auto" and c.get("used_layout") == "split")
+        rendered = c.get("version", 0) > 0 or c.get("preview_version", 0) > 0
+        # the clip being edited is re-rendered by the user along with their other changes
+        if c["id"] != clip_id and split and rendered and c["status"] not in ("queued", "rendering"):
+            queue_render(job_id, c["id"], preview=c.get("showing") == "preview")
+            count += 1
+    with _lock:
+        job["cam_box"] = clean["cam_box"]     # remembered for clips found later (live streams)
+    _save(job)
+    return count
 
 
 def _apply_look(clip, style, index=0):

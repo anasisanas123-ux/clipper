@@ -8,7 +8,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import ai, config, effects, jobs, live, music, performance, providers, sources, templates, updater, youtube
@@ -127,6 +127,39 @@ def default_template(body: dict = Body(...)):
 def delete_template(tid: str):
     templates.delete(tid)
     return list_templates()
+
+
+@app.get("/api/jobs/{job_id}/frame")
+def job_frame(job_id: str, clip: str = ""):
+    """A frame of the video to mark the facecam on."""
+    job = _job(job_id)
+    try:
+        return Response(jobs.frame_jpeg(job, clip or None), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+    except Exception as e:
+        raise HTTPException(400, f"Couldn't get a frame from this video: {str(e)[-200:]}")
+
+
+@app.get("/api/frame/latest")
+def latest_frame():
+    """A frame from the most recent video that has clips, for marking the facecam in the template editor."""
+    for j in jobs.list_jobs():
+        job = jobs.get(j["id"])
+        if job and job.get("clips"):
+            try:
+                return Response(jobs.frame_jpeg(job), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+            except Exception:
+                continue
+    raise HTTPException(404, "Add a video first: the facecam is marked on a frame from one of your videos.")
+
+
+@app.post("/api/jobs/{job_id}/cam")
+def set_cam(job_id: str, body: dict = Body(...)):
+    """A facecam area marked by hand, for one clip or every clip in the video."""
+    _job(job_id)
+    try:
+        return {"queued": jobs.set_cam(job_id, body.get("box") or {}, body.get("clip"), bool(body.get("all", True)))}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/jobs/{job_id}/apply-template")

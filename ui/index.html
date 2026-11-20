@@ -201,6 +201,29 @@
   </form>
 </dialog>
 
+<dialog id="cam-marker">
+  <div class="modal wide">
+    <h2>Mark the facecam</h2>
+    <p class="hint">Drag a box around the facecam. The dashed outline is what the top panel will show: it is widened or heightened a little to fit the panel without stretching.</p>
+    <div class="mk-wrap" id="mk-wrap">
+      <img id="mk-img" alt="A frame from the video" draggable="false">
+      <div class="mk-fit" id="mk-fit" hidden></div>
+      <div class="mk-box" id="mk-box" hidden></div>
+      <div class="mk-wait" id="mk-wait">Getting a frame from the video…</div>
+    </div>
+    <div class="mk-bottom">
+      <div class="mk-preview"><span class="hint">Top panel preview</span><canvas id="mk-canvas" width="324" height="202"></canvas></div>
+      <div class="mk-side">
+        <label class="row" id="mk-all-row"><input type="checkbox" id="mk-all" checked> Use this area for every clip in this video (clips already rendered with the facecam framing are rendered again)</label>
+        <div class="actions">
+          <button type="button" id="mk-cancel">Cancel</button>
+          <button type="button" class="primary" id="mk-save" disabled>Use this area</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="pick-template">
   <div class="modal">
     <h2>Which template?</h2>

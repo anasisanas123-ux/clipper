@@ -189,3 +189,13 @@ body.dropping::after { content: "Drop the video to add it"; position: fixed; ins
 .pick.active { border-color: currentColor; outline: 1px solid currentColor; }
 .pick > span { display: flex; flex-direction: column; gap: 2px; }
 .pick input { margin-top: 3px; }
+.mk-wrap { position: relative; width: 100%; user-select: none; cursor: crosshair; touch-action: none; background: #000; min-height: 200px; }
+.mk-wrap img { display: block; width: 100%; height: auto; pointer-events: none; }
+.mk-box { position: absolute; border: 2px solid #39ff14; background: rgba(57, 255, 20, .12); pointer-events: none; }
+.mk-fit { position: absolute; border: 2px dashed #fff; box-shadow: 0 0 0 9999px rgba(0, 0, 0, .45); pointer-events: none; }
+.mk-wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px; color: #ccc; }
+.mk-bottom { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
+.mk-preview { display: flex; flex-direction: column; gap: 4px; }
+.mk-preview canvas { width: 216px; height: auto; border-radius: 6px; background: #111; }
+.mk-side { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 8px; }
+#cam-marker .modal.wide { width: 900px; }

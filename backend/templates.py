@@ -11,7 +11,7 @@ FILE = config.DATA / "templates.json"
 # Everything a template holds. "song" may be a track id, "" (no song), or "auto:mood" / "auto:rotate" to pick
 # from your music per clip. "sfx_fixed" maps an effect role (intro, hit, big, transition, ending, emoji) to a
 # sound you always want there; roles left out are chosen to fit the moment.
-KEYS = ("layout", "zoom", "cam_pos", "split_game", "caption_style", "caption_size", "caption_position",
+KEYS = ("layout", "zoom", "cam_pos", "cam_box", "split_game", "caption_style", "caption_size", "caption_position",
         "show_hook", "highlight", "progress_bar", "song", "music_volume", "effects_preset", "filter", "sfx_volume",
         "sfx_source", "sfx_fixed", "tighten", "cold_open", "track_face", "beat_sync")
 # How the moments are found (not part of a clip's look): used when a video made with the template is analysed.
@@ -49,6 +49,13 @@ def clean_style(style: dict) -> dict:
                 out.pop(k)
     if "min_len" in out and "max_len" in out and out["min_len"] >= out["max_len"]:
         out.pop("min_len"), out.pop("max_len")
+    box = out.get("cam_box")
+    if not (isinstance(box, dict) and all(isinstance(box.get(k), (int, float)) for k in ("x", "y", "w", "h"))):
+        out.pop("cam_box", None)
+    else:
+        out["cam_box"] = {k: round(min(1.0, max(0.0, float(box[k]))), 4) for k in ("x", "y", "w", "h")}
+    if out.get("cam_pos") == "custom" and "cam_box" not in out:
+        out["cam_pos"] = "auto"
     if not isinstance(out.get("sfx_fixed"), dict):
         out.pop("sfx_fixed", None)
     else:
@@ -81,7 +88,7 @@ def delete(tid: str) -> None:
 def base_style(settings: dict) -> dict:
     """The look from Settings, used when no template is chosen (and under a template, for anything it leaves out)."""
     return {"layout": settings.get("default_layout") or "bars", "zoom": settings.get("default_zoom") or 73,
-            "cam_pos": "auto", "split_game": "fill",
+            "cam_pos": "auto", "cam_box": None, "split_game": "fill",
             "caption_style": settings["caption_style"], "caption_size": "medium", "caption_position": "auto",
             "show_hook": True, "highlight": settings["highlight"],
             "progress_bar": settings["progress_bar"], "song": settings.get("default_song", ""),

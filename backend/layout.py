@@ -5,7 +5,7 @@ import numpy as np
 TOP_H, BOT_H = 672, 1248   # split layout: facecam panel over gameplay panel (sums to 1920)
 
 
-CORNERS = ("tl", "tr", "bl", "br")
+CORNERS = ("tl", "tr", "ml", "mr", "bl", "br")    # top/middle/bottom, left/right
 
 
 def _cam_box(W, H, cx, cy, fw):
@@ -32,13 +32,38 @@ def _cam_box(W, H, cx, cy, fw):
 
 
 def corner_box(W, H, corner: str, size: float = 0.3) -> dict:
-    """A facecam box `size` x the frame width, tucked into the corner the user chose."""
+    """A facecam box `size` x the frame width, against the left or right edge: at the top, in the middle or at
+    the bottom (tl, tr, ml, mr, bl, br)."""
     aspect = 1080 / TOP_H
     cw = int(W * size) // 2 * 2
     ch = min(H, int(cw / aspect)) // 2 * 2
-    x = 0 if corner in ("tl", "bl") else W - cw
-    y = 0 if corner in ("tl", "tr") else H - ch
+    x = 0 if corner in ("tl", "ml", "bl") else W - cw
+    y = {"t": 0, "m": (H - ch) // 2 // 2 * 2, "b": H - ch}[corner[0]]
     return {"x": x, "y": y, "w": cw, "h": ch}
+
+
+def marked_box(W, H, frac: dict):
+    """The facecam area drawn by hand (x, y, w, h as shares of the frame, so it fits any resolution), widened or
+    heightened just enough to take the facecam panel's shape without stretching, and kept inside the frame.
+    None when the drawing isn't usable."""
+    try:
+        x, y, w, h = (float(frac[k]) for k in ("x", "y", "w", "h"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if w <= 0.01 or h <= 0.01:
+        return None
+    aspect = 1080 / TOP_H
+    cx, cy = (x + w / 2) * W, (y + h / 2) * H
+    cw, ch = w * W, h * H
+    if cw / ch < aspect:
+        cw = ch * aspect          # too tall for the panel: show a bit more on the sides
+    else:
+        ch = cw / aspect          # too wide: show a bit more above and below
+    scale = min(1.0, W / cw, H / ch)
+    cw, ch = cw * scale, ch * scale
+    x0 = float(np.clip(cx - cw / 2, 0, W - cw))
+    y0 = float(np.clip(cy - ch / 2, 0, H - ch))
+    return {"x": int(x0) // 2 * 2, "y": int(y0) // 2 * 2, "w": max(2, int(cw) // 2 * 2), "h": max(2, int(ch) // 2 * 2)}
 
 
 def detect(video_path) -> dict:

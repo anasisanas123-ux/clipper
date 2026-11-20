@@ -110,6 +110,78 @@ $('#new-job').addEventListener('submit', async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 
+// ---------- marking the facecam by hand ----------
+// The area is kept as shares of the frame (0-1), so it fits the video at any resolution. The backend widens or
+// heightens it to the facecam panel's shape (1080 x 672) without stretching; the dashed outline shows that.
+const PANEL = 1080 / 672;
+let mk = null;   // { resolve, box, natural: [w, h] } while the marker is open
+
+function fitPanel(b, W, H) {
+  let cx = (b.x + b.w / 2) * W, cy = (b.y + b.h / 2) * H, cw = b.w * W, ch = b.h * H;
+  if (cw / ch < PANEL) cw = ch * PANEL; else ch = cw / PANEL;
+  const s = Math.min(1, W / cw, H / ch); cw *= s; ch *= s;
+  const x = Math.max(0, Math.min(W - cw, cx - cw / 2)), y = Math.max(0, Math.min(H - ch, cy - ch / 2));
+  return { x, y, w: cw, h: ch };
+}
+
+function markFacecam(imgUrl, initial, showAll) {
+  return new Promise((resolve) => {
+    mk = { resolve, box: initial || null, natural: null };
+    const img = $('#mk-img');
+    $('#mk-wait').hidden = false; $('#mk-wait').textContent = 'Getting a frame from the video…';
+    $('#mk-box').hidden = $('#mk-fit').hidden = true; $('#mk-save').disabled = true;
+    $('#mk-all-row').hidden = !showAll;
+    img.onload = () => { $('#mk-wait').hidden = true; mk.natural = [img.naturalWidth, img.naturalHeight]; drawMarker(); };
+    img.onerror = async () => {
+      let msg = 'Couldn\'t get a frame from this video.';
+      try { const r = await fetch(imgUrl); msg = (await r.json()).detail || msg; } catch {}
+      $('#mk-wait').textContent = msg;
+    };
+    img.src = imgUrl + (imgUrl.includes('?') ? '&' : '?') + 'n=' + Date.now();
+    $('#cam-marker').showModal();
+  });
+}
+
+function drawMarker() {
+  if (!mk || !mk.natural) return;
+  const img = $('#mk-img'), b = mk.box;
+  const show = (el, r) => { el.hidden = !r; if (r) Object.assign(el.style, { left: r.x * img.clientWidth + 'px', top: r.y * img.clientHeight + 'px', width: r.w * img.clientWidth + 'px', height: r.h * img.clientHeight + 'px' }); };
+  const ok = b && b.w > 0.01 && b.h > 0.01;
+  show($('#mk-box'), ok ? b : null);
+  const [W, H] = mk.natural;
+  const f = ok ? fitPanel(b, W, H) : null;
+  show($('#mk-fit'), f ? { x: f.x / W, y: f.y / H, w: f.w / W, h: f.h / H } : null);
+  const cv = $('#mk-canvas'), ctx = cv.getContext('2d');
+  ctx.fillStyle = '#111'; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (f) ctx.drawImage(img, f.x, f.y, f.w, f.h, 0, 0, cv.width, cv.height);
+  $('#mk-save').disabled = !ok;
+}
+
+(() => {
+  const wrap = $('#mk-wrap');
+  let start = null;
+  const at = (e) => {
+    const r = $('#mk-img').getBoundingClientRect();
+    return [Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)), Math.max(0, Math.min(1, (e.clientY - r.top) / r.height))];
+  };
+  wrap.addEventListener('pointerdown', (e) => {
+    if (!mk || !mk.natural) return;
+    start = at(e); wrap.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  wrap.addEventListener('pointermove', (e) => {
+    if (!start) return;
+    const [x, y] = at(e);
+    mk.box = { x: Math.min(x, start[0]), y: Math.min(y, start[1]), w: Math.abs(x - start[0]), h: Math.abs(y - start[1]) };
+    drawMarker();
+  });
+  wrap.addEventListener('pointerup', () => { start = null; });
+  window.addEventListener('resize', drawMarker);
+  const finish = (value) => { const m = mk; mk = null; $('#cam-marker').close(); if (m) m.resolve(value); };
+  $('#mk-save').onclick = () => finish({ box: Object.fromEntries(Object.entries(mk.box).map(([k, v]) => [k, Math.round(v * 10000) / 10000])), all: $('#mk-all').checked && !$('#mk-all-row').hidden });
+  $('#mk-cancel').onclick = () => finish(null);
+  $('#cam-marker').addEventListener('cancel', (e) => { e.preventDefault(); finish(null); });
+})();
+
 // ---------- "which template?" before a video starts ----------
 let pickResolve = null;    // set while the question is open (or parked while the template editor is open)
 let pickChoice = '';
@@ -210,7 +282,8 @@ function songSelectOptions(select, current, withAuto) {
 const TPL_CHOICES = {
   layout: [['split', 'Facecam top, gameplay bottom'], ['bars', 'Black bars'], ['blur', 'Blurred background (same video)'],
     ['crop', 'Centre crop (full screen)'], ['story', 'Story card (text above, video in a box)'], ['auto', 'Auto (picks per clip)']],
-  cam_pos: [['auto', 'Find it automatically'], ['tl', 'Top left'], ['tr', 'Top right'], ['bl', 'Bottom left'], ['br', 'Bottom right']],
+  cam_pos: [['auto', 'Find it automatically'], ['tl', 'Top left'], ['tr', 'Top right'], ['ml', 'Middle left'], ['mr', 'Middle right'],
+    ['bl', 'Bottom left'], ['br', 'Bottom right'], ['custom', 'Marked by hand']],
   split_game: [['fill', 'Fill the panel (crops the sides)'], ['fit', 'Show the whole game (blurred edges)']],
   caption_style: [['pop', 'Word-by-word pop'], ['edit', 'Edit captions (coloured keywords)'], ['meme', 'Meme caption (one line, whole clip)'],
     ['karaoke', 'Karaoke line'], ['clean', 'Clean'], ['none', 'No captions']],
@@ -270,7 +343,16 @@ function editTemplate(id) {
     s.addEventListener('change', () => { if (s.value) fixed[role] = s.value; else delete fixed[role]; });
     return fld(label, s);
   });
-  const splitBox = h('div', { class: 'grid2' }, fld('Where the facecam is in the stream', camPos), fld('Gameplay (bottom half)', splitGame));
+  let tplBox = v.cam_box || null;
+  if (camPos.value === 'custom' && !tplBox) camPos.value = 'auto';
+  const tplMark = h('button', { type: 'button', title: 'Draw a box around the facecam on a frame from your most recent video' }, 'Mark the facecam…');
+  tplMark.onclick = async () => {
+    const r = await markFacecam('/api/frame/latest', tplBox, false);
+    if (r) { tplBox = r.box; camPos.value = 'custom'; toast('Facecam area marked. Save the template to keep it.'); }
+  };
+  camPos.addEventListener('change', () => { if (camPos.value === 'custom' && !tplBox) tplMark.click(); });
+  const splitBox = h('div', { class: 'grid2' }, h('label', { class: 'field' }, h('span', {}, 'Where the facecam is in the stream'), camPos, tplMark),
+    fld('Gameplay (bottom half)', splitGame));
   const zoomBox = fld('Picture height % (bars / blurred)', zoom);
   const showFraming = () => {
     splitBox.hidden = !['split', 'auto'].includes(layout.value);
@@ -313,7 +395,7 @@ function editTemplate(id) {
   showFraming();
 
   async function saveForm(copy) {
-    const style = { sfx_fixed: { ...fixed } };
+    const style = { sfx_fixed: { ...fixed }, cam_box: tplBox };
     for (const el of form.querySelectorAll('[name]')) {
       if (el.name === 'name') continue;
       style[el.name] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? (el.value === '' ? null : +el.value) : el.value;
@@ -539,14 +621,30 @@ function buildCard(job, clip) {
   const zoom = h('input', { type: 'range', min: 30, max: 100, step: 1, value: clip.zoom || 73 });
   const zoomLabel = h('span', {});
   const zoomField = h('label', { class: 'field' }, zoomLabel, zoom);
-  const camPos = h('select', {},
-    h('option', { value: 'auto' }, 'Find it automatically'), h('option', { value: 'tl' }, 'Top left'),
-    h('option', { value: 'tr' }, 'Top right'), h('option', { value: 'bl' }, 'Bottom left'), h('option', { value: 'br' }, 'Bottom right'));
+  const camPos = h('select', {}, ...TPL_CHOICES.cam_pos.map(([k, l]) => h('option', { value: k }, l)));
   const splitGame = h('select', {},
     h('option', { value: 'fill' }, 'Fill the panel (crops the sides)'), h('option', { value: 'fit' }, 'Show the whole game (blurred edges)'));
-  camPos.value = clip.cam_pos || 'auto'; splitGame.value = clip.split_game || 'fill';
+  let camBox = clip.cam_box || null;       // the area marked by hand, as shares of the frame
+  camPos.value = clip.cam_pos === 'custom' && !camBox ? 'auto' : (clip.cam_pos || 'auto'); splitGame.value = clip.split_game || 'fill';
+  let lastInfo = clip.layout_info;          // the facecam found automatically, to start the marker from
+  const markBtn = h('button', { type: 'button', title: 'Draw a box around the facecam on a frame of this clip' }, 'Mark the facecam…');
+  markBtn.onclick = async () => {
+    let start = camBox;
+    const cam = lastInfo && lastInfo.cam;
+    if (!start && cam && lastInfo.width) start = { x: cam.x / lastInfo.width, y: cam.y / lastInfo.height, w: cam.w / lastInfo.width, h: cam.h / lastInfo.height };
+    const r = await markFacecam(`/api/jobs/${job.id}/frame?clip=${clip.id}`, start, job.clips.length > 1);
+    if (!r) return;
+    camBox = r.box; camPos.value = 'custom';
+    try {
+      const q = await api(`/api/jobs/${job.id}/cam`, { body: { box: r.box, clip: clip.id, all: r.all } });
+      toast((r.all ? 'Facecam area set for every clip in this video' + (q.queued ? `; ${q.queued} re-rendering` : '') : 'Facecam area set')
+        + '. Press "Re-render with changes" (or Quick preview) to see this clip with it.');
+      if (r.all) poll();
+    } catch (err) { toast(err.message, true); }
+  };
+  camPos.addEventListener('change', () => { if (camPos.value === 'custom' && !camBox) markBtn.click(); });
   const splitFields = h('div', { class: 'grid2' },
-    h('label', { class: 'field' }, h('span', {}, 'Where the facecam is in the stream'), camPos),
+    h('label', { class: 'field' }, h('span', {}, 'Where the facecam is in the stream'), camPos, markBtn),
     h('label', { class: 'field' }, h('span', {}, 'Gameplay (bottom)'), splitGame));
   const showZoom = () => {
     zoomLabel.textContent = `Zoom: picture fills ${zoom.value}% of the height` + (+zoom.value >= 100 ? ' (no bars)' : '');
@@ -643,7 +741,7 @@ function buildCard(job, clip) {
     highlight: colour.value, song: song.value, music_volume: +volume.value, progress_bar: bar.checked,
     start: draft.start, end: draft.end, story: storyText.value.trim(), comment: comment.value.trim(),
     tighten: tighten.box.checked, cold_open: coldOpen.box.checked, track_face: trackFace.box.checked, beat_sync: beatSync.box.checked,
-    cam_pos: camPos.value, split_game: splitGame.value,
+    cam_pos: camPos.value === 'custom' && !camBox ? 'auto' : camPos.value, cam_box: camBox || undefined, split_game: splitGame.value,
     caption_size: capSize.value, caption_position: capPos.value, show_hook: showHook.checked,
     ...fx.value(),
   });
@@ -735,6 +833,10 @@ function buildCard(job, clip) {
     }
     badge.hidden = !(isPreview && shown >= 0);
     clip.final_len = c.final_len; showRange();
+    lastInfo = c.layout_info || lastInfo;
+    if (c.cam_pos === 'custom' && c.cam_box && JSON.stringify(c.cam_box) !== JSON.stringify(camBox)) {
+      camBox = c.cam_box; camPos.value = 'custom';     // marked on another clip of this video
+    }
     video.hidden = shown < 0;
     fx.sync(c);
     if (busy) overlay.replaceChildren(h('div', { class: 'spinner' }), h('div', {}, c.status === 'queued' ? 'Waiting in line' : (c.step || 'Working')));
@@ -980,7 +1082,7 @@ const FIELDS = ['clip_count', 'min_len', 'max_len', 'default_layout', 'default_z
 
 function describeStyle(s) {
   const framing = { bars: 'black bars', blur: 'blurred background', auto: 'auto framing', crop: 'full-screen crop', split: 'facecam + gameplay', story: 'story card' };
-  const corner = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right' };
+  const corner = { tl: 'top-left', tr: 'top-right', ml: 'middle-left', mr: 'middle-right', bl: 'bottom-left', br: 'bottom-right', custom: 'marked by hand' };
   const song = !s.song ? 'no song' : s.song.startsWith('auto:') ? 'auto song' : 'song: ' + s.song.split('/').pop().replace(/\.\w+$/, '');
   return [framing[s.layout] || s.layout, s.layout === 'split' && corner[s.cam_pos] ? `facecam ${corner[s.cam_pos]}` : '',
     s.caption_style && s.caption_style + ' captions', s.effects_preset && s.effects_preset + ' effects',
