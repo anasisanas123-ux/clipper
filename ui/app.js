@@ -100,19 +100,65 @@ $('#new-job').addEventListener('submit', async (e) => {
   e.preventDefault();
   const url = $('#url').value.trim();
   if (!url) return;
+  // Nothing starts until a template is chosen: every clip of the video is set up with it before rendering.
+  const template = await chooseTemplate(url);
+  if (template == null) return;
   try {
-    const job = await api('/api/jobs', { body: { url, kind: $('#kind').value, topic: $('#topic').value.trim(), template: $('#template').value } });
+    const job = await api('/api/jobs', { body: { url, kind: $('#kind').value, topic: $('#topic').value.trim(), template } });
     $('#url').value = '';
     openJob(job.id);
   } catch (err) { toast(err.message, true); }
 });
+
+// ---------- "which template?" before a video starts ----------
+let pickResolve = null;    // set while the question is open (or parked while the template editor is open)
+let pickChoice = '';
+
+function chooseTemplate(url) {
+  return new Promise(async (resolve) => {
+    await loadTemplates();
+    if (!state.fx) await loadEffects();
+    pickResolve = resolve;
+    pickChoice = state.tpl.default || '';
+    const name = url.split(/[\\/]/).pop() || url;
+    $('#pick-source').textContent = `Every clip found in "${name.length > 70 ? name.slice(0, 67) + '…' : name}" will be made with the template you pick here, before anything is rendered.`;
+    drawPicks();
+    $('#pick-template').showModal();
+  });
+}
+
+function drawPicks() {
+  const list = (state.tpl && state.tpl.templates) || [];
+  const card = (id, title, desc) => h('label', { class: 'pick' + (pickChoice === id ? ' active' : '') },
+    h('input', { type: 'radio', name: 'pick', value: id, checked: pickChoice === id, onchange: () => { pickChoice = id; drawPicks(); } }),
+    h('span', {}, h('b', {}, title), h('span', { class: 'hint' }, desc)));
+  $('#pick-list').replaceChildren(
+    ...list.map((t) => card(t.id, t.name + (state.tpl.default === t.id ? '  ★ default' : ''), describeStyle(t.style))),
+    card('', 'No template', 'Use the defaults from Settings'),
+    list.length ? null : h('p', { class: 'hint' }, 'You have no templates yet. "Make or edit templates…" creates one, then you come back here.'));
+}
+
+function finishPick(value) {
+  const done = pickResolve;
+  pickResolve = null;
+  $('#pick-template').close();
+  if (done) done(value);
+}
+
+$('#pick-start').onclick = () => finishPick(pickChoice);
+$('#pick-cancel').onclick = () => finishPick(null);
+$('#pick-template').addEventListener('cancel', (e) => { e.preventDefault(); finishPick(null); });   // Esc = cancel
+$('#pick-edit').onclick = async () => {
+  // park the question, open the editor; closing the editor brings the question back with the new templates
+  $('#pick-template').close();
+  await openTemplates(pickChoice || undefined);
+};
 
 // ---------- templates ----------
 // A template is a saved look (framing, facecam corner, captions, effects, sounds, song, filter, timeline options)
 // that every clip of a new video is made with.
 async function loadTemplates() {
   try { state.tpl = await api('/api/templates'); } catch { state.tpl = { templates: [], default: '', auto_songs: {} }; }
-  fillTemplateSelect($('#template'), state.tpl.default, 'Settings defaults (no template)');
   const pick = $('#job-template');
   if (pick) fillTemplateSelect(pick, '', 'Apply a template…');
 }
@@ -128,7 +174,7 @@ async function saveTemplate(style) {
   const list = (state.tpl && state.tpl.templates) || [];
   const name = prompt('Name this template (an existing name updates that template):', list.length ? '' : 'My style');
   if (name == null) return;
-  const makeDefault = confirm('Make every new video use this template?\n\nOK = yes, make it the default. Cancel = just save it (pick it next to "Find clips" when you want it).');
+  const makeDefault = confirm('Make every new video use this template?\n\nOK = yes, make it the default. Cancel = just save it (Clipper offers it every time you press "Find clips").');
   try {
     const r = await api('/api/templates', { body: { name, style, make_default: makeDefault } });
     state.tpl = r;
@@ -298,6 +344,14 @@ async function deleteTemplate(t) {
 $('#open-templates').onclick = async () => { await loadTemplates(); openTemplates(); };
 $('#tpl-new').onclick = () => editTemplate('');
 $('#tpl-close').onclick = () => $('#templates').close();
+$('#templates').addEventListener('close', async () => {
+  if (!pickResolve) return;
+  // the "which template?" question was waiting: bring it back, on the template just made or edited
+  await loadTemplates();
+  if ((state.tpl.templates || []).some((t) => t.id === tplEditing)) pickChoice = tplEditing;
+  drawPicks();
+  $('#pick-template').showModal();
+});
 $('#settings-templates').onclick = async () => { await loadTemplates(); openTemplates(); };
 
 // ---------- job view ----------

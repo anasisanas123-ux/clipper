@@ -184,3 +184,8 @@ body.dropping::after { content: "Drop the video to add it"; position: fixed; ins
 #templates .modal.wide { width: 1000px; }
 .tpl-side .list { overflow-x: hidden; }
 .tpl-item, .tpl-item span { white-space: normal; overflow-wrap: anywhere; }
+.pick-list { display: flex; flex-direction: column; gap: 8px; max-height: 55vh; overflow-y: auto; }
+.pick { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid rgba(127,127,127,.35); border-radius: 8px; cursor: pointer; }
+.pick.active { border-color: currentColor; outline: 1px solid currentColor; }
+.pick > span { display: flex; flex-direction: column; gap: 2px; }
+.pick input { margin-top: 3px; }

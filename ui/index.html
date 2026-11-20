@@ -19,7 +19,6 @@
       <option value="film">Film / TV reaction</option>
     </select>
     <input id="topic" type="text" placeholder="Topic (e.g. GTA 6)" autocomplete="off">
-    <select id="template" title="Template: the look every clip from this video is made with"></select>
     <button class="primary" type="submit">Find clips</button>
   </form>
   <button id="open-templates" title="Make and edit templates: the look every new video is made with">Templates</button>
@@ -202,10 +201,23 @@
   </form>
 </dialog>
 
+<dialog id="pick-template">
+  <div class="modal">
+    <h2>Which template?</h2>
+    <p class="hint" id="pick-source"></p>
+    <div id="pick-list" class="pick-list"></div>
+    <div class="actions">
+      <button type="button" class="link" id="pick-edit">Make or edit templates…</button>
+      <button type="button" id="pick-cancel">Cancel</button>
+      <button type="button" class="primary" id="pick-start">Start</button>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="templates">
   <div class="modal wide">
     <h2>Templates</h2>
-    <p class="hint">Every clip of a new video is set up with the chosen template before it is rendered. Pick the template next to "Find clips", or mark one as the default for every new video. To change a video you already made, use "Apply a template…" on that video.</p>
+    <p class="hint">Every clip of a new video is set up with the chosen template before it is rendered. Clipper asks which template to use each time you press "Find clips"; the default is picked to start with. To change a video you already made, use "Apply a template…" on that video.</p>
     <div class="tpl-layout">
       <div class="tpl-side">
         <div id="tpl-list" class="list"></div>
